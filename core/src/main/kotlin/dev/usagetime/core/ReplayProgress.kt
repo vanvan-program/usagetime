@@ -18,7 +18,7 @@ data class ReplayProgress(val initialized:Boolean=false,val dirtyFrom:Long?=null
         return LocalReplayPlan(minOf(baseline,dirty),target)
     }
 }
-data class QueryBoundary(val start:Long,val end:Long,val elapsed:Long,val boot:String,val zone:String){
-    init{require(start>=0&&end>=start&&elapsed>=-1&&boot.isNotBlank()&&zone.isNotBlank())}
+data class QueryBoundary(val start:Long,val end:Long,val elapsed:Long,val boot:String,val zone:String,val uncertainty:Long=0){
+    init{require(start>=0&&end>=start&&elapsed>=-1&&boot.isNotBlank()&&zone.isNotBlank()&&uncertainty>=0)}
 }
 data class LocalReplayPlan(val start:Long,val boundary:QueryBoundary)

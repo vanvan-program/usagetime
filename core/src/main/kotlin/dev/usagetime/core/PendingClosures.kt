@@ -8,9 +8,9 @@ class PendingClosures(input:List<ClosedEvidence>) {
         .mapValues{(_,items)->items.groupBy{it.value.origin}}
     fun add(metric:String,app:String,start:Long,refs:String,reason:String){
         val origins=candidates[metric to app]?:return
-        refs.splitToSequence(',').forEach{origin->
+        refs.splitToSequence(',').filter{it.startsWith(DualUsageEngine.PROOF_PREFIX)}.map{it.removePrefix(DualUsageEngine.PROOF_PREFIX)}.forEach{origin->
             origins[origin]?.forEach{(index,c)->
-                if(start<c.at&&(!c.focus||reason.startsWith("EXPLICIT",ignoreCase=true)))earliest[index]=minOf(earliest[index],start)
+                if(start<c.at&&(c.focus==reason.startsWith("EXPLICIT",ignoreCase=true)))earliest[index]=minOf(earliest[index],start)
             }
         }
     }

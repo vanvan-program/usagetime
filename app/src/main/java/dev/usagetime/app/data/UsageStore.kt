@@ -310,35 +310,61 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
     suspend fun aggregate(window:Window,zone:ZoneId,grain:Grain,metric:UsageMetric,app:String?,includeConfirmed:Boolean=true):UsageReport=cachedReport(ReportKey(window,zone.id,grain,metric,app,includeConfirmed)){database.withTransaction{
         if(grain==Grain.HOUR){
             val budget=CacheBudget(200000).apply{rows=dual.hourCount();floor=dual.hourFirst(zone.id)}
-            val slotCells=Reports.slots(window,zone,Grain.HOUR).map{slot->slot to DailyMetrics.displayCells(hourlyCells(slot,metric,zone,budget),includeConfirmed)}
-            return@withTransaction DailyMetrics.hourReport(slotCells,window,zone,app)
+            val slotCells=Reports.slots(window,zone,Grain.HOUR).map{slot->slot to hourlyCells(slot,metric,zone,budget)}
+            return@withTransaction DailyMetrics.hourReport(slotCells,window,zone,app,includeConfirmed)
         }
         if(grain==Grain.MONTH){
             val dayBudget=CacheBudget(500000).apply{rows=dual.dailyCount();floor=dual.cacheFirst(zone.id)}
             val monthBudget=CacheBudget(500000).apply{rows=dual.monthCount();floor=dual.monthFirst(zone.id)}
             val monthCells=Reports.slots(window,zone,Grain.MONTH).map{slot->slot to monthlyCells(slot,metric,zone,dayBudget,monthBudget)}
-            return@withTransaction DailyMetrics.monthReport(monthCells.map{(slot,cells)->slot to DailyMetrics.displayCells(cells.first,includeConfirmed)},window,zone,app,monthCells.sumOf{it.second.second})
+            return@withTransaction DailyMetrics.monthReport(monthCells.map{(slot,cells)->slot to cells.first},window,zone,app,monthCells.sumOf{it.second.second},includeConfirmed)
         }
         val budget=CacheBudget(500000).apply{rows=dual.dailyCount();floor=dual.cacheFirst(zone.id)}
-        val accumulator=DailyMetrics.Accumulator(window,zone,grain,app)
+        val accumulator=DailyMetrics.Accumulator(window,zone,grain,app,includeConfirmed=includeConfirmed)
         for(slot in Reports.slots(window,zone,Grain.DAY)){
             currentCoroutineContext().ensureActive()
-            accumulator.addDay(DailyMetrics.displayCells(dailyCells(slot,metric,zone,budget),includeConfirmed))
+            accumulator.addDay(dailyCells(slot,metric,zone,budget))
         }
         accumulator.finish()
     }}
     suspend fun diagnostics()=withContext(Dispatchers.IO){mutex.withLock{dual.diagnostics()}}
     private suspend fun log(time:Long,code:String,detail:String){dual.diagnostics(listOf(DiagnosticLog(DualCodec.hash("$time|$code|$detail"),time,code,detail.take(512))))}
     /** Own-window evidence uses only public callbacks; it never observes another app's focus. */
-    suspend fun ownEvent(signal:Signal,activity:String,instance:String,observedAt:Long,interactive:Boolean,isLocked:Boolean)=withContext(Dispatchers.IO){mutex.withLock{
+    suspend fun ownEvent(signal:Signal,activity:String,instance:String,observedAt:Long,interactive:Boolean,isLocked:Boolean,processSession:String?=null,processStartedAt:Long=observedAt,clock:ClockSample?=null)=withContext(Dispatchers.IO){mutex.withLock{
         if(!recording||!permitted())return@withLock
         ensureWriteSpace()
         val now=observedAt;val zone=ZoneId.systemDefault().id
         if((dual.latest()?.time?:0)>System.currentTimeMillis()){log(now,"OWN_EVENT_CLOCK_QUARANTINED","Wall clock is behind saved boundary");return@withLock}
-        val own=DualCodec.event(now,signal,context.packageName,activity,instance,EvidenceSource.OWN_WINDOW,zone)
+        val own=DualCodec.event(now,signal,context.packageName,activity,instance,EvidenceSource.OWN_WINDOW,zone).let{row->
+            if(clock==null)row else row.copy(origin=DualCodec.encodeClock(clock))
+        }
         val screen=if(interactive)Signal.SCREEN_ON else Signal.NON_INTERACTIVE
         val lock=if(isLocked)Signal.LOCK else Signal.UNLOCK
-        database.withTransaction{dual.events(listOf(own,DualCodec.event(now,screen,source=EvidenceSource.OWN_WINDOW,zone=zone),DualCodec.event(now,lock,source=EvidenceSource.OWN_WINDOW,zone=zone)));markReplayDirty(now)}
+        database.withTransaction{
+            if(clock!=null){
+                val previous=DualCodec.decodeClock(dual.ownClock())
+                // IO callbacks may arrive out of order; only chronological samples diagnose clocks.
+                if(previous==null||previous.boot!=clock.boot||clock.elapsed>=previous.elapsed){
+                    previous?.let{old->
+                        ClockDiagnosis.inspect(old,clock)?.let{diagnosis->
+                            val start=minOf(old.wall,clock.wall);val end=maxOf(old.wall,clock.wall)
+                            if(end>start){
+                                dual.events(listOf(DualCodec.event(start,Signal.CLOCK_UNCERTAIN,source=EvidenceSource.OWN_WINDOW,zone=zone),
+                                    DualCodec.event(end,Signal.CLOCK_TRUSTED,source=EvidenceSource.OWN_WINDOW,zone=zone)))
+                                markReplayDirty(start)
+                            }
+                            log(now,diagnosis,"Own observations do not share a continuous clock domain")
+                        }
+                    }
+                    dual.checkpoint(SyncCheckpoint(-3,DualCodec.encodeClock(clock),0,-1,"","",0))
+                }
+            }
+            if(processSession!=null){
+                val session=DualCodec.event(minOf(processStartedAt,now),Signal.OWN_SESSION_START,context.packageName,instance=processSession,source=EvidenceSource.OWN_WINDOW,zone=zone)
+                if(dual.events(listOf(session)).single()!=-1L)markReplayDirty(session.time)
+            }
+            dual.events(listOf(own,DualCodec.event(now,screen,source=EvidenceSource.OWN_WINDOW,zone=zone),DualCodec.event(now,lock,source=EvidenceSource.OWN_WINDOW,zone=zone)));markReplayDirty(now)
+        }
     }}
     fun label(pkg:String):String=names.getOrPut(pkg){
         runCatching{context.packageManager.getApplicationLabel(context.packageManager.getApplicationInfo(pkg,0)).toString()}.getOrDefault(pkg.substringAfterLast('.'))
@@ -378,7 +404,7 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         val requestedAt=SystemClock.elapsedRealtime()
         mutex.withLock{
         val acquiredAt=SystemClock.elapsedRealtime()
-        if(recording&&dual.evidenceRevision()!="own-window-037"){
+        if(recording&&dual.evidenceRevision()!="strict-evidence-0311"){
             if(dual.latest()!=null&&dual.firstEvent()!=null)rebuildHistoryInsideLock()
             else database.withTransaction{saveEvidenceRevision()}
         }
@@ -392,11 +418,11 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         if(!recording)return@withLock "自动记录已暂停"
         if(!context.getSystemService(UserManager::class.java).isUserUnlocked)throw SyncUnavailable("设备解锁后再补记")
         ensureWriteSpace()
-        val sample=testClock?.invoke()?:ClockSample(System.currentTimeMillis(),SystemClock.elapsedRealtime(),Settings.Global.getInt(context.contentResolver,Settings.Global.BOOT_COUNT,-1).toString())
+        val sample=testClock?.invoke()?:ClockSampling.capture(System::currentTimeMillis,SystemClock::elapsedRealtime,Settings.Global.getInt(context.contentResolver,Settings.Global.BOOT_COUNT,-1).toString())
         val now=sample.wall;val elapsed=sample.elapsed;val boot=sample.boot
         val zone=ZoneId.systemDefault();val latest=dual.latest();val day=86_400_000L
         val savedQuery=DualCodec.decodeProgress(dual.replayMetadata()).queried
-        val clockReference=savedQuery?.let{ClockSample(it.end,it.elapsed,it.boot)}?:latest?.let{ClockSample(it.wall,it.elapsed,it.boot)}
+        val clockReference=savedQuery?.let{ClockSample(it.end,it.elapsed,it.boot,it.uncertainty)}?:DualCodec.decodeClock(dual.collectionClock())?:latest?.let{ClockSample(it.wall,it.elapsed,it.boot)}
         val clock=clockReference?.let{ClockDiagnosis.inspect(it,sample)}
         if(now<=(latest?.time?:-1)||now<(savedQuery?.end?:-1)){
             log(now,"WALL_CLOCK_BACKWARD","Sync quarantined, saved history unchanged")
@@ -441,7 +467,11 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
             queryMs=SystemClock.elapsedRealtime()-queryStarted
             if(interrupted||clock!=null||latest!=null&&queryStart>latest.time){
                 val boundary=latest?.time?:savedQuery?.end?:queryStart
-                dual.events(listOf(DualCodec.event(boundary,Signal.GAP,source=EvidenceSource.OWN_WINDOW,zone=zone.id)))
+                val markers=if(clock!=null)listOf(
+                    DualCodec.event(boundary,Signal.CLOCK_UNCERTAIN,source=EvidenceSource.OWN_WINDOW,zone=zone.id),
+                    DualCodec.event(now,Signal.CLOCK_TRUSTED,source=EvidenceSource.OWN_WINDOW,zone=zone.id))
+                else listOf(DualCodec.event(boundary,Signal.GAP,source=EvidenceSource.OWN_WINDOW,zone=zone.id))
+                dual.events(markers)
                 earliestNew=minOf(earliestNew?:boundary,boundary)
                 log(now,clock?:if(interrupted)"PERMISSION_INTERRUPTION"else"RETENTION_GAP","Continuity reset; no synthetic durations")
             }
@@ -449,7 +479,7 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
             if(!hasLifecycle)log(now,"EMPTY_SYSTEM_QUERY","Empty response is not proof of zero use")
             val progress=DualCodec.decodeProgress(dual.replayMetadata())
             val replayStart=progress.start(latest?.time,queryStart,earliestNew)
-            saveProgress(progress.markDirty(replayStart).copy(queried=QueryBoundary(queryStart,now,elapsed,boot,zone.id)))
+            saveProgress(progress.markDirty(replayStart).copy(queried=QueryBoundary(queryStart,now,elapsed,boot,zone.id,sample.uncertainty)))
         }
         }catch(e:kotlinx.coroutines.CancellationException){throw e}
         catch(e:Exception){
@@ -465,7 +495,7 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
             val progress=DualCodec.decodeProgress(dual.replayMetadata())
             val requestedStart=progress.start(latest?.time,queryStart,earliestNew)
             dao.apps(observedApps.map{SavedApp(it,label(it))})
-            recomputeInsideTransaction(now,elapsed,boot,zone,requestedStart,queryStart,homes,timings)
+            recomputeInsideTransaction(now,elapsed,boot,zone,requestedStart,queryStart,homes,timings,sample.uncertainty)
             log(now,"SYNC_COMMITTED","query=$queryStart..$now; raw=$rawCount; replay=${timings.replayStart}; incremental=${progress.initialized}; algorithm=${DualUsageEngine.VERSION}; zone=${zone.id}")
         }
         }catch(e:kotlinx.coroutines.CancellationException){throw e}
@@ -482,7 +512,7 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
     }}
     private class SyncTimings{var replayMs=0L;var summaryMs=0L;var replaySpan=0L;var replayStart=0L}
     /** Replay saved evidence from requestedStart and rebuild hour/day/month summaries inside the caller's transaction. */
-    private suspend fun recomputeInsideTransaction(now:Long,elapsed:Long,boot:String,zone:ZoneId,requestedStart:Long,cutCandidate:Long,homes:Set<String>,timings:SyncTimings){
+    private suspend fun recomputeInsideTransaction(now:Long,elapsed:Long,boot:String,zone:ZoneId,requestedStart:Long,cutCandidate:Long,homes:Set<String>,timings:SyncTimings,clockUncertainty:Long=0){
         val previousEnd=dual.latest()?.time
         require(previousEnd==null||now>=previousEnd){"重放终点不能早于已处理边界"}
         val anchor=dual.checkpoint(requestedStart)
@@ -540,6 +570,7 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         }
         timings.summaryMs=SystemClock.elapsedRealtime()-summariesStarted
         finishReplay(now)
+        dual.checkpoint(SyncCheckpoint(-4,DualCodec.encodeClock(ClockSample(now,elapsed,boot,clockUncertainty)),0,-1,"","",0))
     }
     /** Recompute evidence already saved locally; never contacts the platform, so permission loss cannot stall it. */
     private suspend fun processPendingInsideLock():String{
@@ -547,19 +578,19 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         val progress=DualCodec.decodeProgress(dual.replayMetadata())
         if(progress.dirtyFrom==null)return "统计已是最新"
         ensureWriteSpace()
-        val sample=testClock?.invoke()?:ClockSample(System.currentTimeMillis(),SystemClock.elapsedRealtime(),Settings.Global.getInt(context.contentResolver,Settings.Global.BOOT_COUNT,-1).toString())
+        val sample=testClock?.invoke()?:ClockSampling.capture(System::currentTimeMillis,SystemClock::elapsedRealtime,Settings.Global.getInt(context.contentResolver,Settings.Global.BOOT_COUNT,-1).toString())
         val latest=dual.latest()
         val savedBoundary=latest?.let{QueryBoundary(it.time,it.time,it.elapsed,it.boot,it.zone)}
         val plan=progress.localReplay(savedBoundary,sample.wall)?:return "本地事件等待有效的采集边界"
         val boundary=plan.boundary;val zone=ZoneId.of(boundary.zone)
         // A reboot or time jump at retry time cannot extend this historical, already acquired range.
-        val diagnosis=ClockDiagnosis.inspect(ClockSample(boundary.end,boundary.elapsed,boundary.boot),sample)
+        val diagnosis=ClockDiagnosis.inspect(ClockSample(boundary.end,boundary.elapsed,boundary.boot,boundary.uncertainty),sample)
         if(diagnosis!=null)log(sample.wall,diagnosis,"Local replay limited to saved acquisition end=${boundary.end}")
         val homes=context.packageManager.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME),0).map{it.activityInfo.packageName}.toSet()+"com.android.systemui"
         invalidateReports()
         val timings=SyncTimings()
         try{
-            database.withTransaction{recomputeInsideTransaction(boundary.end,boundary.elapsed,boundary.boot,zone,plan.start,boundary.start,homes,timings)}
+            database.withTransaction{recomputeInsideTransaction(boundary.end,boundary.elapsed,boundary.boot,zone,plan.start,boundary.start,homes,timings,boundary.uncertainty)}
             log(sample.wall,"LOCAL_REPLAY_COMMITTED","local-only replay=${timings.replayStart}..${boundary.end}")
             return "已根据本地事件更新统计"
         }catch(e:kotlinx.coroutines.CancellationException){throw e}
@@ -590,7 +621,7 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
     }
     /** Bounded-memory replay of saved evidence; never asks the platform to recover years-old events. */
     private suspend fun saveEvidenceRevision(){
-        dual.checkpoint(SyncCheckpoint(-2,"own-window-037",0,-1,"","",0))
+        dual.checkpoint(SyncCheckpoint(-2,"strict-evidence-0311",0,-1,"","",0))
     }
     suspend fun rebuildHistory():String=withContext(Dispatchers.IO){mutex.withLock{rebuildHistoryInsideLock()}}
     private suspend fun rebuildHistoryInsideLock():String{

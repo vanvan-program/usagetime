@@ -6,6 +6,8 @@ import dev.usagetime.app.data.*
 import java.util.concurrent.TimeUnit
 
 class UsageTimeApplication:Application(){
+    val processSession:String=java.util.UUID.randomUUID().toString()
+    val processStartedAt:Long=System.currentTimeMillis()
     val observationScope=kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob()+kotlinx.coroutines.Dispatchers.IO)
     val store by lazy{UsageStore(this)}
     override fun onCreate(){super.onCreate();schedule(this)}

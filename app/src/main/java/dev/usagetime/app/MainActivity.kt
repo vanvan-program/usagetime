@@ -44,11 +44,13 @@ import java.time.format.DateTimeFormatter
 class MainActivity:ComponentActivity(){
     private val observationId=java.util.UUID.randomUUID().toString()
     private fun observe(signal:Signal){
-        val app=application as UsageTimeApplication;val at=System.currentTimeMillis()
+        val app=application as UsageTimeApplication
+        val clock=ClockSampling.capture(System::currentTimeMillis,android.os.SystemClock::elapsedRealtime,Settings.Global.getInt(contentResolver,Settings.Global.BOOT_COUNT,-1).toString())
+        val at=clock.wall
         val interactive=getSystemService(android.os.PowerManager::class.java).isInteractive
         val locked=getSystemService(android.app.KeyguardManager::class.java).isKeyguardLocked
         val activityName=this@MainActivity.javaClass.name
-        app.observationScope.launch{runCatching{app.store.ownEvent(signal,activityName,observationId,at,interactive,locked)}}
+        app.observationScope.launch{runCatching{app.store.ownEvent(signal,activityName,"${app.processSession}/$observationId",at,interactive,locked,app.processSession,app.processStartedAt,clock)}}
     }
     override fun onResume(){super.onResume();observe(Signal.RESUME)}
     override fun onPause(){observe(Signal.PAUSE);super.onPause()}
@@ -79,9 +81,11 @@ private val Brown=Color(0xFF8A5F16)
             fun cell(text:String)="\""+(if(text.startsWith("=")||text.startsWith("+")||text.startsWith("-")||text.startsWith("@"))"'$text" else text).replace("\"","\"\"")+"\""
             val metric=cell(if(model.selection.legacy)"旧版未分级"else model.selection.metric.label)
             val q=report.quality
-            val summary="范围汇总,$metric,所选范围,,${report.total},${q?.confirmed?:""},${q?.inferred?:""},${q?.unknown?:""},${q?.provisional?:""}"
-            val rows=report.apps.map{val aq=report.appQuality[it.app];"应用,$metric,${cell(model.label(it.app))},${cell(it.app)},${it.millis},${aq?.confirmed?:""},${aq?.inferred?:""},,${aq?.provisional?:""}"}
-            val body="\uFEFF记录类型,指标,应用,包名,可归属毫秒,确定毫秒,推断毫秒,范围未知毫秒,暂定毫秒\r\n"+(listOf(summary)+rows).joinToString("\r\n")
+            val basis=cell(if(model.selection.legacy)"旧版未分级"else if(model.showConfirmed)"已确认与候选估计"else"仅候选估计")
+            val note=cell("候选可能与未知覆盖重叠，不能相加；未闭合不计入累计；毫秒是事件记录单位")
+            val summary="范围汇总,$metric,所选范围,,${report.total},${q?.confirmed?:""},${q?.inferred?:""},${q?.unknown?:""},${q?.provisional?:""},$basis,$note"
+            val rows=report.apps.map{val aq=report.appQuality[it.app];"应用,$metric,${cell(model.label(it.app))},${cell(it.app)},${it.millis},${aq?.confirmed?:""},${aq?.inferred?:""},,${aq?.provisional?:""},$basis,$note"}
+            val body="\uFEFF记录类型,指标,应用,包名,统计累计毫秒,已确认毫秒,候选估计毫秒,范围未知覆盖毫秒,未闭合覆盖毫秒,累计口径,口径说明\r\n"+(listOf(summary)+rows).joinToString("\r\n")
             context.contentResolver.openOutputStream(uri)?.use{it.write(body.toByteArray())}?:error("无法写入文件")
         };model.message="报表已导出"}catch(e:Exception){model.message="导出失败：${e.message}"}
     }}
@@ -190,19 +194,19 @@ private fun customDates(context:android.content.Context,model:UsageModel){
         if(r!=null){
             item{
                 Row(Modifier.fillMaxWidth().padding(vertical=8.dp),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.SpaceBetween){
-                    Text(if(s.legacy)"旧版累计（未分级）"else if(!model.showConfirmed)"${s.metric.label} · 推断时间累计"else "${s.metric.label} · 使用累计（确定＋推断）",style=MaterialTheme.typography.bodyMedium,color=MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(if(s.legacy)"旧版累计（未分级）"else if(!model.showConfirmed)"${s.metric.label} · 候选估计累计"else "${s.metric.label} · 已确认与候选估计",style=MaterialTheme.typography.bodyMedium,color=MaterialTheme.colorScheme.onSurfaceVariant)
                     if(r.buckets.any{it.available})TimeValue(r.total)else Text("未记录",style=MaterialTheme.typography.headlineMedium,color=MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 Row(Modifier.fillMaxWidth().padding(bottom=14.dp),horizontalArrangement=Arrangement.SpaceBetween){
                     Text(if(s.period==Period.TODAY)"当天按小时统计"else "已记录日均 ${durationText(r.total / model.display.recordedDays.coerceAtLeast(1))}",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
                     Text(if(s.detail)"占总用时 ${percent(r.total,model.display.all?.total?:0)}"else "${r.apps.size} 个应用",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                if(model.showConfirmed)QualityStatus(r)
+                QualityStatus(r)
                 HorizontalDivider(color=MaterialTheme.colorScheme.outlineVariant)
                 Row(Modifier.fillMaxWidth().padding(top=4.dp),verticalAlignment=Alignment.CenterVertically){Text("使用趋势",Modifier.weight(1f),style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.SemiBold);ChartSwitch(s.line){model.change{state->state.copy(line=it)}}}
                 if(s.period==Period.ALL)Row(horizontalArrangement=Arrangement.spacedBy(4.dp)){listOf(Grain.DAY,Grain.WEEK,Grain.MONTH).forEach{g->FilterChip(selected=s.grain==g,onClick={model.change{it.copy(grain=g)}},label={Text(g.label)})}}
                 UsageChart(r.buckets,line=s.line)
-                if(r.buckets.none{it.available})Text(if(!s.legacy&&!model.showConfirmed)"这个范围暂无推断使用记录。"else if((r.quality?.unknown?:0)>0)"此范围尚无法确定应用归属，请查看上方未知时长。"else"这个范围没有可归属的使用记录",Modifier.padding(vertical=8.dp),color=MaterialTheme.colorScheme.onSurfaceVariant)
+                if(r.buckets.none{it.available})Text(if((r.quality?.unknown?:0)>0)"此范围尚无法确定应用归属，请查看上方未知时长。"else"这个范围没有已闭合的使用记录",Modifier.padding(vertical=8.dp),color=MaterialTheme.colorScheme.onSurfaceVariant)
                 HorizontalDivider(Modifier.padding(top=8.dp),color=MaterialTheme.colorScheme.outlineVariant)
             }
             if(s.detail){
@@ -292,7 +296,7 @@ private fun windowLabel(w:Window,z:ZoneId):String {val a=Dates.date(w.start,z);v
                     Column(Modifier.weight(1f)){Text("统计$unit",color=MaterialTheme.colorScheme.primary,style=MaterialTheme.typography.labelMedium);Text(if(r.buckets.any{it.available})durationText(r.total)else"未记录",style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.SemiBold)}
                     Column(Modifier.weight(1f)){Text("对照$unit",color=MaterialTheme.colorScheme.secondary,style=MaterialTheme.typography.labelMedium);Text(if(other.buckets.any{it.available})durationText(other.total)else"未记录",style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.SemiBold)}
                 }
-                if(model.showConfirmed){QualityStatus(r,"统计周期");QualityStatus(other,"对照周期")}
+                QualityStatus(r,"统计周期");QualityStatus(other,"对照周期")
                 val diff=r.total-other.total
                 val canCompare=r.buckets.any{it.available}&&other.buckets.any{it.available}
                 val partial=!r.fullyCovered||!other.fullyCovered
@@ -338,7 +342,7 @@ private fun windowLabel(w:Window,z:ZoneId):String {val a=Dates.date(w.start,z);v
         Row(Modifier.fillMaxWidth().heightIn(min=64.dp),verticalAlignment=Alignment.CenterVertically){
             Column(Modifier.weight(1f)){
                 Text("显示确定时间",style=MaterialTheme.typography.bodyLarge)
-                Text("默认只显示推断时间；开启后计入确定时间并显示明细",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("控制累计是否计入已确认时间；未知与暂定区间始终展示",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Switch(checked=model.showConfirmed,onCheckedChange={model.showConfirmed(it)})
         }
@@ -380,8 +384,9 @@ private fun windowLabel(w:Window,z:ZoneId):String {val a=Dates.date(w.start,z);v
 @Composable private fun QualityStatus(report:UsageReport,label:String="数据可信状态"){
     report.quality?.let{q->Column(Modifier.fillMaxWidth().padding(bottom=10.dp)){
         Text(label,style=MaterialTheme.typography.labelMedium)
-        Text("确定 ${durationText(q.confirmed)} · 推断 ${durationText(q.inferred)}",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
-        Text("无法确定 ${durationText(q.unknown)} · 暂定区间 ${durationText(q.provisional)}",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("已确认 ${durationText(q.confirmed)} · 候选估计 ${durationText(q.inferred)}",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("无法确定 ${durationText(q.unknown)} · 未闭合 ${durationText(q.provisional)}",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("候选不代表已证明的实际用时；可与未知区间重叠，不能相加。未闭合区间不计入累计。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
     }}
 }
 

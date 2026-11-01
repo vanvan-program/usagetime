@@ -85,12 +85,12 @@ queries=re.findall(r'@Query\("([^"\n]+)"\)',source)
 finalize=next(q for q in queries if q.startswith('UPDATE usage_intervals SET evidence='))
 invalidate=next(q for q in queries if q=='DELETE FROM daily_usage WHERE dayEnd>:start')
 for identity,ref,metric in [('pending','focus-old','PRIMARY'),('other-ref','focus-old-extra','PRIMARY'),('visible','focus-old','VISIBLE')]:
- db.execute('INSERT INTO usage_intervals VALUES (?,?,?,?,?,?,?,?,?,?,?)',(identity,metric,'fixture.app',100,200,'INFERRED','EXPLICIT_WINDOW_FOCUS_OPEN_TAIL','OWN_WINDOW',ref,1,2))
+ db.execute('INSERT INTO usage_intervals VALUES (?,?,?,?,?,?,?,?,?,?,?)',(identity,metric,'fixture.app',100,200,'UNKNOWN','EXPLICIT_WINDOW_FOCUS_OPEN_TAIL','OWN_WINDOW','proof:'+ref,1,2))
 args=dict(metric='PRIMARY',app='fixture.app',origin='focus-old',at=300,prefix='EXPLICIT%',evidence='CONFIRMED',ending=',focus-close')
 # Earliest matching start is tested by the streaming core matcher; this fixture starts at 100.
 earliest=100
 db.execute(finalize,args)
-assert db.execute("SELECT evidence,provisional,refs FROM usage_intervals WHERE id='pending'").fetchone()==('CONFIRMED',0,'focus-old,focus-close')
+assert db.execute("SELECT evidence,provisional,refs FROM usage_intervals WHERE id='pending'").fetchone()==('CONFIRMED',0,'proof:focus-old,focus-close')
 assert db.execute("SELECT provisional FROM usage_intervals WHERE id='other-ref'").fetchone()[0]==1
 assert db.execute("SELECT provisional FROM usage_intervals WHERE id='visible'").fetchone()[0]==1
 print('PASS: production DAO finalizes only the matching metric and exact evidence reference')
@@ -150,7 +150,7 @@ print('PASS: changed reporting algorithm invalidates old caches without removing
 
 scan=next(q for q in re.findall(r'query\("([^"\n]+)"\)',store_source) if q.startswith('SELECT metric,app,start,refs,reason'))
 rows=db.execute(scan).fetchall()
-assert {row[3] for row in rows}=={'focus-old-extra','focus-old'}
+assert {row[3] for row in rows}=={'proof:focus-old-extra','proof:focus-old'}
 assert all(row[2]==100 for row in rows)
 print('PASS: production closure scan streams only pending local rows without per-session MIN queries')
 

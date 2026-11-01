@@ -9,13 +9,16 @@ import java.security.MessageDigest
 
 @Entity(tableName="usage_events",indices=[Index(value=["time","id"])])
 data class StoredEvent(@PrimaryKey val id:String,val time:Long,val signal:String,val app:String,val activity:String,val instance:String?,val source:String,val zone:String,val origin:String="LOCAL",val rawType:Int?=null){
-    fun event()=ObservedEvent(id,time,Signal.valueOf(signal),app,
+    fun event()=ObservedEvent(id,time,if(source=="OWN_WINDOW"&&signal=="FOCUS_GAIN"&&DualCodec.decodeClock(origin)==null)Signal.OTHER else Signal.valueOf(signal),app,
         if(source=="OWN_WINDOW"&&app=="dev.usagetime.app"&&activity=="kotlinx.coroutines.StandaloneCoroutine")"$app.MainActivity"else activity,
         instance,EvidenceSource.valueOf(source))
 }
 @Entity(tableName="usage_intervals",indices=[Index("start"),Index("end"),Index(value=["metric","start"]),Index(value=["provisional","metric","app"])])
 data class StoredSlice(@PrimaryKey val id:String,val metric:String,val app:String?,val start:Long,val end:Long,val evidence:String,val reason:String,val sources:String,val refs:String,val provisional:Boolean,val algorithm:Int=2){
-    fun slice()=UsageSlice(UsageMetric.valueOf(metric),app,start,end,Evidence.valueOf(evidence),reason,sources.split(',').filter{it.isNotEmpty()}.map{EvidenceSource.valueOf(it)}.toSet(),refs.split(',').filter{it.isNotEmpty()}.toSet(),provisional)
+    fun slice():UsageSlice{
+        val tokens=refs.split(',').filter{it.isNotEmpty()}.toSet()
+        return UsageSlice(UsageMetric.valueOf(metric),app,start,end,Evidence.valueOf(evidence),reason,sources.split(',').filter{it.isNotEmpty()}.map{EvidenceSource.valueOf(it)}.toSet(),tokens.filterNot{it.startsWith(DualUsageEngine.PROOF_PREFIX)}.toSet(),provisional,tokens.filter{it.startsWith(DualUsageEngine.PROOF_PREFIX)}.map{it.removePrefix(DualUsageEngine.PROOF_PREFIX)}.toSet())
+    }
 }
 @Entity(tableName="daily_usage",indices=[Index(value=["metric","dayStart"]),Index(value=["zone","dayStart"])])
 data class DailyUsage(@PrimaryKey val id:String,val dayStart:Long,val dayEnd:Long,val zone:String,val metric:String,val app:String?,val evidence:String,val millis:Long,val provisionalMillis:Long,val algorithm:Int=2)
@@ -35,7 +38,7 @@ data class DiagnosticLog(@PrimaryKey val id:String,val time:Long,val code:String
     @Query("DELETE FROM sync_checkpoints WHERE algorithm=2 AND time<:before AND time NOT IN (SELECT MAX(time) FROM sync_checkpoints WHERE algorithm=2 GROUP BY time/86400000)") suspend fun compactCheckpoints(before:Long)
     @Insert(onConflict=OnConflictStrategy.IGNORE) suspend fun events(values:List<StoredEvent>):List<Long>
     @Query("SELECT * FROM usage_events WHERE time>=:start AND time<:end AND source!='LEGACY_IMPORT' ORDER BY time,id") suspend fun events(start:Long,end:Long):List<StoredEvent>
-    @Query("UPDATE usage_intervals SET evidence=:evidence, provisional=0, refs=refs||:ending, reason=replace(reason,'_OPEN_TAIL','') WHERE algorithm=2 AND metric=:metric AND app=:app AND start<:at AND provisional=1 AND instr(','||refs||',',','||:origin||',')>0 AND reason LIKE :prefix")
+    @Query("UPDATE usage_intervals SET evidence=:evidence, provisional=0, refs=refs||:ending, reason=replace(reason,'_OPEN_TAIL','') WHERE algorithm=2 AND metric=:metric AND app=:app AND start<:at AND `end`<=:at AND (provisional=1 OR (:evidence='UNKNOWN' AND evidence!='UNKNOWN')) AND instr(','||refs||',',',proof:'||:origin||',')>0 AND ((:prefix='EXPLICIT%' AND reason LIKE 'EXPLICIT%') OR (:prefix='%' AND reason NOT LIKE 'EXPLICIT%'))")
     suspend fun finalizeEvidence(metric:String,app:String,origin:String,at:Long,evidence:String,prefix:String,ending:String)
     @Query("SELECT MIN(time) FROM usage_events WHERE source!='LEGACY_IMPORT'") suspend fun firstEvent():Long?
     @Query("SELECT MIN(time) FROM usage_events WHERE time>=:start AND source!='LEGACY_IMPORT' AND signal!='OTHER'") suspend fun firstRelevantEventFrom(start:Long):Long?
@@ -46,6 +49,8 @@ data class DiagnosticLog(@PrimaryKey val id:String,val time:Long,val code:String
     @Query("SELECT * FROM sync_checkpoints WHERE algorithm=2 ORDER BY time DESC LIMIT 1") suspend fun latest():SyncCheckpoint?
     @Query("SELECT state FROM sync_checkpoints WHERE time=-1 AND algorithm=0") suspend fun replayMetadata():String?
     @Query("SELECT state FROM sync_checkpoints WHERE time=-2 AND algorithm=0") suspend fun evidenceRevision():String?
+    @Query("SELECT state FROM sync_checkpoints WHERE time=-3 AND algorithm=0") suspend fun ownClock():String?
+    @Query("SELECT state FROM sync_checkpoints WHERE time=-4 AND algorithm=0") suspend fun collectionClock():String?
     @Query("DELETE FROM sync_checkpoints WHERE time>:time") suspend fun deleteCheckpointsAfter(time:Long)
     @Insert(onConflict=OnConflictStrategy.REPLACE) suspend fun checkpoint(value:SyncCheckpoint)
     @Insert(onConflict=OnConflictStrategy.REPLACE) suspend fun diagnostics(values:List<DiagnosticLog>)
@@ -69,17 +74,25 @@ data class DiagnosticLog(@PrimaryKey val id:String,val time:Long,val code:String
     @Query("DELETE FROM month_usage WHERE algorithm!=3 OR zone!=:zone OR monthStart<(SELECT MIN(monthStart) FROM (SELECT monthStart FROM month_usage WHERE zone=:zone ORDER BY monthStart DESC LIMIT :maxRows))") suspend fun trimMonthCache(zone:String,maxRows:Int=500000)
 }
 object DualCodec {
+    fun encodeClock(value:ClockSample):String=JSONObject().put("wall",value.wall).put("elapsed",value.elapsed).put("boot",value.boot).put("uncertainty",value.uncertainty).toString()
+    fun decodeClock(text:String?):ClockSample?{
+        if(text==null)return null
+        return runCatching{
+            val j=JSONObject(text)
+            ClockSample(j.getLong("wall"),j.getLong("elapsed"),j.getString("boot"),j.optLong("uncertainty",0)).also{require(it.wall>=0&&it.elapsed>=0&&it.boot.isNotBlank()&&it.uncertainty>=0)}
+        }.getOrNull()
+    }
     fun decodeProgress(text:String?):ReplayProgress {
         if(text==null)return ReplayProgress()
         return try{
             val j=JSONObject(text)
             if(j.optString("format")!="usage-replay-progress"||j.optInt("version") !in 1..2)return ReplayProgress()
-            val q=j.optJSONObject("queried")?.let{QueryBoundary(it.getLong("start"),it.getLong("end"),it.getLong("elapsed"),it.getString("boot"),it.getString("zone"))}
+            val q=j.optJSONObject("queried")?.let{QueryBoundary(it.getLong("start"),it.getLong("end"),it.getLong("elapsed"),it.getString("boot"),it.getString("zone"),it.optLong("uncertainty",0))}
             q?.let{java.time.ZoneId.of(it.zone)}
             ReplayProgress(j.getBoolean("ready"),if(j.isNull("dirtyFrom"))null else j.getLong("dirtyFrom"),q)
         }catch(_:IllegalArgumentException){ReplayProgress()}catch(_:org.json.JSONException){ReplayProgress()}catch(_:java.time.DateTimeException){ReplayProgress()}
     }
-    fun encodeProgress(value:ReplayProgress):String=JSONObject().put("format","usage-replay-progress").put("version",2).put("ready",value.initialized).put("dirtyFrom",value.dirtyFrom?:JSONObject.NULL).put("queried",value.queried?.let{JSONObject().put("start",it.start).put("end",it.end).put("elapsed",it.elapsed).put("boot",it.boot).put("zone",it.zone)}?:JSONObject.NULL).toString()
+    fun encodeProgress(value:ReplayProgress):String=JSONObject().put("format","usage-replay-progress").put("version",2).put("ready",value.initialized).put("dirtyFrom",value.dirtyFrom?:JSONObject.NULL).put("queried",value.queried?.let{JSONObject().put("start",it.start).put("end",it.end).put("elapsed",it.elapsed).put("boot",it.boot).put("zone",it.zone).put("uncertainty",it.uncertainty)}?:JSONObject.NULL).toString()
     /** Flatten only our well-formed provenance envelope; keep the oldest source and reason. */
     fun importReason(reason:String,evidence:String,sources:String):String {
         var raw=reason;var grade=evidence;var origin=sources
@@ -121,12 +134,16 @@ object DualCodec {
         return buildString(64){digest.forEach{b->val n=b.toInt() and 255;append(digits[n ushr 4]);append(digits[n and 15])}}
     }
     fun event(time:Long,signal:Signal,app:String="",activity:String="",instance:String?=null,source:EvidenceSource=EvidenceSource.USAGE_EVENTS,zone:String)=StoredEvent(hash(listOf(time,signal,app,activity,instance,source).joinToString("|")),time,signal.name,app,activity,instance,source.name,zone)
-    fun stored(s:UsageSlice,algorithm:Int=2)=StoredSlice(hash(listOf(algorithm,s.metric,s.app,s.start,s.end,s.evidence,s.reason,s.provisional,s.references.sorted()).joinToString("|")),s.metric.name,s.app,s.start,s.end,s.evidence.name,s.reason,s.sources.sortedBy{it.name}.joinToString(","){it.name},s.references.sorted().joinToString(","),s.provisional,algorithm)
-    fun encode(s:EngineState):String=JSONObject().put("screen",s.screen.name).put("locked",s.locked.name).put("references",JSONArray(s.references.toList())).put("displayOff",s.displayOff).put("screenRef",s.screenRef?:JSONObject.NULL).put("lockRef",s.lockRef?:JSONObject.NULL).put("focusRefs",JSONObject(s.focusRefs)).put("focus",JSONObject(s.focuses)).put("activities",JSONArray().apply{s.activities.forEach{(key,n)->put(JSONObject().put("key",key).put("app",n.app).put("activity",n.activity).put("instance",n.instance?:JSONObject.NULL).put("stage",n.stage.name).put("source",n.source.name).put("since",n.since).put("origin",n.origin))}}).toString()
+    fun stored(s:UsageSlice,algorithm:Int=2):StoredSlice{
+        val refs=(s.references+s.proofRefs.map{DualUsageEngine.PROOF_PREFIX+it}).sorted()
+        return StoredSlice(hash(listOf(algorithm,s.metric,s.app,s.start,s.end,s.evidence,s.reason,s.provisional,refs).joinToString("|")),s.metric.name,s.app,s.start,s.end,s.evidence.name,s.reason,s.sources.sortedBy{it.name}.joinToString(","){it.name},refs.joinToString(","),s.provisional,algorithm)
+    }
+    fun encode(s:EngineState):String=JSONObject().put("screen",s.screen.name).put("locked",s.locked.name).put("references",JSONArray(s.references.toList())).put("displayOff",s.displayOff).put("deniedFocus",JSONArray(s.deniedFocus.toList())).put("clockTrusted",s.clockTrusted).put("screenRef",s.screenRef?:JSONObject.NULL).put("lockRef",s.lockRef?:JSONObject.NULL).put("focusRefs",JSONObject(s.focusRefs)).put("focus",JSONObject(s.focuses)).put("activities",JSONArray().apply{s.activities.forEach{(key,n)->put(JSONObject().put("key",key).put("app",n.app).put("activity",n.activity).put("instance",n.instance?:JSONObject.NULL).put("stage",n.stage.name).put("source",n.source.name).put("since",n.since).put("origin",n.origin))}}).toString()
     fun decode(text:String):EngineState {
         val j=JSONObject(text);val array=j.getJSONArray("activities");val a=(0 until array.length()).map{array.getJSONObject(it)}.associate{it.getString("key") to ActivityNode(it.getString("app"),it.getString("activity"),if(it.isNull("instance"))null else it.getString("instance"),ActivityStage.valueOf(it.getString("stage")),EvidenceSource.valueOf(it.getString("source")),it.getLong("since"),it.getString("origin"))}
         val f=j.getJSONObject("focus");val refs=j.getJSONArray("references")
-        return EngineState(a,Knowledge.valueOf(j.getString("screen")),Knowledge.valueOf(j.getString("locked")),f.keys().asSequence().associateWith{f.getString(it)},(0 until refs.length()).map{refs.getString(it)}.toSet(),if(j.isNull("screenRef"))null else j.getString("screenRef"),if(j.isNull("lockRef"))null else j.getString("lockRef"),j.optJSONObject("focusRefs")?.let{obj->obj.keys().asSequence().associateWith{obj.getString(it)}}?:emptyMap(),j.optBoolean("displayOff",false))
+        val denied=j.optJSONArray("deniedFocus")
+        return EngineState(a,Knowledge.valueOf(j.getString("screen")),Knowledge.valueOf(j.getString("locked")),f.keys().asSequence().associateWith{f.getString(it)},(0 until refs.length()).map{refs.getString(it)}.toSet(),if(j.isNull("screenRef"))null else j.getString("screenRef"),if(j.isNull("lockRef"))null else j.getString("lockRef"),j.optJSONObject("focusRefs")?.let{obj->obj.keys().asSequence().associateWith{obj.getString(it)}}?:emptyMap(),j.optBoolean("displayOff",false),denied?.let{(0 until it.length()).map{index->it.getString(index)}.toSet()}?:emptySet(),j.optBoolean("clockTrusted",true))
     }
     /** Preserve archived slices, but never let imports override the locally recomputed time domain. */
     fun effective(values:List<StoredSlice>):List<UsageSlice> = values.groupBy{it.metric}.values.flatMap{effectiveMetric(it)}

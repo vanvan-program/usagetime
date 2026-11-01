@@ -4,6 +4,28 @@ import org.json.JSONObject
 import org.junit.Test
 import org.junit.Assert.*
 class BackupProvenanceTest {
+ @Test fun historicalOwnFocusWithoutMonotonicMetadataCannotBeReconfirmed(){
+  val raw=dev.usagetime.app.data.StoredEvent("old",1,"FOCUS_GAIN","dev.usagetime.app","Main","old","OWN_WINDOW","UTC")
+  assertEquals(dev.usagetime.core.Signal.OTHER,raw.event().signal)
+  assertEquals(dev.usagetime.core.Signal.FOCUS_GAIN,raw.copy(origin=DualCodec.encodeClock(dev.usagetime.core.ClockSample(1,1,"boot"))).event().signal)
+  assertEquals("FOCUS_GAIN",raw.signal)
+ }
+ @Test fun attributionProofsRoundTripSeparatelyFromAuditReferences(){
+  val value=dev.usagetime.core.UsageSlice(dev.usagetime.core.UsageMetric.PRIMARY,"a",0,10,dev.usagetime.core.Evidence.UNKNOWN,"EXPLICIT_WINDOW_FOCUS_OPEN_TAIL",setOf(dev.usagetime.core.EvidenceSource.OWN_WINDOW),setOf("unrelated","focus"),true,setOf("focus"))
+  val stored=DualCodec.stored(value)
+  assertTrue(stored.refs.split(',').contains("proof:focus"))
+  assertEquals(value,stored.slice())
+ }
+ @Test fun checkpointRetainsFocusDenialAndClockQuarantine(){
+  val state=dev.usagetime.core.EngineState(deniedFocus=setOf("old"),clockTrusted=false)
+  assertEquals(state,DualCodec.decode(DualCodec.encode(state)))
+ }
+ @Test fun ownMonotonicSamplesRoundTripAndMalformedSamplesAreRejected(){
+  val sample=dev.usagetime.core.ClockSample(1000,200,"boot")
+  assertEquals(sample,DualCodec.decodeClock(DualCodec.encodeClock(sample)))
+  assertNull(DualCodec.decodeClock("""{"wall":-1,"elapsed":200,"boot":"boot"}"""))
+  assertNull(DualCodec.decodeClock("broken"))
+ }
  @Test fun legacyCoroutineActivityIsNormalizedWithoutChangingRawEvent(){
   val raw=dev.usagetime.app.data.StoredEvent("old",1,"RESUME","dev.usagetime.app","kotlinx.coroutines.StandaloneCoroutine","instance","OWN_WINDOW","Asia/Shanghai")
   assertEquals("dev.usagetime.app.MainActivity",raw.event().activity)

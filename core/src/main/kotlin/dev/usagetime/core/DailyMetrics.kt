@@ -33,38 +33,39 @@ object DailyMetrics {
         return days.count()
     }
     /** Hour-grain report built from per-hour stored cells; equals the slice-based build when rows are complete. */
-    fun hourReport(slotCells:List<Pair<Window,List<MetricDayCell>>>,window:Window,zone:ZoneId,app:String?):UsageReport{
+    fun hourReport(slotCells:List<Pair<Window,List<MetricDayCell>>>,window:Window,zone:ZoneId,app:String?,includeConfirmed:Boolean=true):UsageReport{
         val attributed=slotCells.flatMap{it.second}.filter{attributedCells(it)}
-        val totals=attributed.filter{app==null||it.app==app}.groupBy{it.app!!}.map{(pkg,items)->AppTotal(pkg,items.sumOf{it.millis})}.sortedByDescending{it.millis}
+        val totals=attributed.filter{(app==null||it.app==app)&&(includeConfirmed||it.evidence!=Evidence.CONFIRMED)}.groupBy{it.app!!}.map{(pkg,items)->AppTotal(pkg,items.sumOf{it.millis})}.filter{it.millis>0}.sortedByDescending{it.millis}
         var covered=0L
         val buckets=slotCells.map{(slot,cells)->
-            val value=cells.filter{attributedCells(it)&&(app==null||it.app==app)}.sumOf{it.millis}
+            val value=cells.filter{attributedCells(it)&&(app==null||it.app==app)&&(includeConfirmed||it.evidence!=Evidence.CONFIRMED)}.sumOf{it.millis}
             val observed=cells.filter{it.app==OBSERVED}.sumOf{it.millis}
             covered+=observed
-            val complete=observed>=slot.duration
+            val complete=observed>=slot.duration&&cells.filter{it.app==SUMMARY}.sumOf{it.millis}==0L
             val label=Instant.ofEpochMilli(slot.start).atZone(zone).format(DateTimeFormatter.ofPattern("HH:mm"))
             Bucket(slot.start,slot.end,label,value,complete,complete||value>0||observed>0)
         }
         val summary=slotCells.flatMap{it.second}.filter{it.app==SUMMARY}
-        val unknown=summary.sumOf{it.millis};val provisional=summary.sumOf{it.provisional}
+        val unknown=slotCells.sumOf{(slot,cells)->cells.firstOrNull{it.app==SUMMARY}?.millis?:slot.duration};val provisional=summary.sumOf{it.provisional}
         fun quality(pkg:String?):MetricSummary{
             val rows=attributed.filter{pkg==null||it.app==pkg}
             val confirmed=rows.filter{it.evidence==Evidence.CONFIRMED}.sumOf{it.millis}
             val inferred=rows.filter{it.evidence==Evidence.INFERRED}.sumOf{it.millis}
             // Unknown spans are global in both the slice-based summary and the cell cache.
-            return MetricSummary(confirmed,inferred,unknown,if(pkg==null)provisional else rows.sumOf{it.provisional})
+            return MetricSummary(confirmed,inferred,unknown,if(pkg==null)provisional else slotCells.flatMap{it.second}.filter{it.app==pkg}.sumOf{it.provisional})
         }
-        return UsageReport(window,buckets,totals,covered,window.duration>0&&covered>=window.duration,quality(app),totals.associate{it.app to quality(it.app)})
+        val q=quality(app)
+        return UsageReport(window,buckets,totals,covered,window.duration>0&&covered>=window.duration&&q.unknown==0L&&q.inferred==0L&&q.provisional==0L,q,totals.associate{it.app to quality(it.app)})
     }
     /** Month-grain report built from per-month cells merged out of day cells; mirrors Accumulator.finish. */
-    fun monthReport(slotCells:List<Pair<Window,List<MetricDayCell>>>,window:Window,zone:ZoneId,app:String?,recordedDays:Long):UsageReport{
+    fun monthReport(slotCells:List<Pair<Window,List<MetricDayCell>>>,window:Window,zone:ZoneId,app:String?,recordedDays:Long,includeConfirmed:Boolean=true):UsageReport{
         val attributed=slotCells.flatMap{it.second}.filter{attributedCells(it)}
-        val totals=attributed.filter{app==null||it.app==app}.groupBy{it.app!!}.map{(pkg,items)->AppTotal(pkg,items.sumOf{it.millis})}.sortedByDescending{it.millis}
+        val totals=attributed.filter{(app==null||it.app==app)&&(includeConfirmed||it.evidence!=Evidence.CONFIRMED)}.groupBy{it.app!!}.map{(pkg,items)->AppTotal(pkg,items.sumOf{it.millis})}.filter{it.millis>0}.sortedByDescending{it.millis}
         var covered=0L;var unknown=0L;var provisional=0L
         val buckets=slotCells.map{(slot,cells)->
-            val value=cells.filter{attributedCells(it)&&(app==null||it.app==app)}.sumOf{it.millis}
+            val value=cells.filter{attributedCells(it)&&(app==null||it.app==app)&&(includeConfirmed||it.evidence!=Evidence.CONFIRMED)}.sumOf{it.millis}
             val observed=cells.filter{it.app==OBSERVED}.sumOf{it.millis}
-            val missing=cells.filter{it.app==SUMMARY}.sumOf{it.millis}
+            val missing=cells.firstOrNull{it.app==SUMMARY}?.millis?:slot.duration
             unknown+=missing;provisional+=cells.filter{it.app==SUMMARY}.sumOf{it.provisional}
             covered+=observed
             val complete=observed>=slot.duration&&missing==0L
@@ -73,7 +74,7 @@ object DailyMetrics {
         }
         fun quality(pkg:String?):MetricSummary{
             val rows=attributed.filter{pkg==null||it.app==pkg}
-            return MetricSummary(rows.filter{it.evidence==Evidence.CONFIRMED}.sumOf{it.millis},rows.filter{it.evidence==Evidence.INFERRED}.sumOf{it.millis},unknown,if(pkg==null)provisional else rows.sumOf{it.provisional})
+            return MetricSummary(rows.filter{it.evidence==Evidence.CONFIRMED}.sumOf{it.millis},rows.filter{it.evidence==Evidence.INFERRED}.sumOf{it.millis},unknown,if(pkg==null)provisional else slotCells.flatMap{it.second}.filter{it.app==pkg}.sumOf{it.provisional})
         }
         val q=quality(app)
         return UsageReport(window,buckets,totals,covered,window.duration>0&&covered>=window.duration&&q.unknown==0L&&q.inferred==0L&&q.provisional==0L,q,totals.associate{it.app to quality(it.app)},recordedDays.toInt())
@@ -101,7 +102,7 @@ object DailyMetrics {
         fun count()=completed+if(available())1 else 0
     }
     /** Retains bucket/app totals only, not ten years of daily rows. Feed disjoint days in order. */
-    class Accumulator(private val window:Window,private val zone:ZoneId,private val grain:Grain,private val app:String?=null,private val legacyCoverage:Boolean=false){
+    class Accumulator(private val window:Window,private val zone:ZoneId,private val grain:Grain,private val app:String?=null,private val legacyCoverage:Boolean=false,private val includeConfirmed:Boolean=true){
         private val slots=Reports.slots(window,zone,grain)
         private val availableDays=AvailableDays(window,zone,legacyCoverage)
         private val values=LongArray(slots.size);private val unknown=LongArray(slots.size)
@@ -121,10 +122,13 @@ object DailyMetrics {
                 SUMMARY->{unknown[i]+=cell.millis;provisional+=cell.provisional}
                 OBSERVED->observed[i]+=cell.millis
                 null->Unit
-                else->if(cell.evidence in setOf(Evidence.CONFIRMED,Evidence.INFERRED)){
+                else->{
                     val totals=apps.getOrPut(cell.app){LongArray(3)}
-                    totals[if(cell.evidence==Evidence.CONFIRMED)0 else 1]+=cell.millis;totals[2]+=cell.provisional
-                    if(app==null||app==cell.app)values[i]+=cell.millis
+                    totals[2]+=cell.provisional
+                    if(cell.evidence in setOf(Evidence.CONFIRMED,Evidence.INFERRED)){
+                        totals[if(cell.evidence==Evidence.CONFIRMED)0 else 1]+=cell.millis
+                        if((app==null||app==cell.app)&&(includeConfirmed||cell.evidence!=Evidence.CONFIRMED))values[i]+=cell.millis
+                    }
                 }
             }}
         }
@@ -135,7 +139,7 @@ object DailyMetrics {
                 val rows=if(pkg==null)apps.values.toList()else listOfNotNull(apps[pkg])
                 return MetricSummary(rows.sumOf{it[0]},rows.sumOf{it[1]},rangeUnknown,if(pkg==null)provisional else rows.sumOf{it[2]})
             }
-            val totals=apps.filterKeys{app==null||it==app}.map{(pkg,t)->AppTotal(pkg,t[0]+t[1])}.sortedByDescending{it.millis}
+            val totals=apps.filterKeys{app==null||it==app}.map{(pkg,t)->AppTotal(pkg,(if(includeConfirmed)t[0]else 0)+t[1])}.filter{it.millis>0}.sortedByDescending{it.millis}
             val buckets=slots.mapIndexed{i,w->
                 val date=Dates.date(w.start,zone)
                 val complete=visited[i]>=w.duration&&observed[i]>=w.duration&&unknown[i]==0L
@@ -157,7 +161,7 @@ object DailyMetrics {
         fun quality(pkg:String?):MetricSummary{
             val items=attributed.filter{pkg==null||it.app==pkg}
             val unknown=cells.filter{it.app==SUMMARY}.sumOf{it.millis}
-            return MetricSummary(items.filter{it.evidence==Evidence.CONFIRMED}.sumOf{it.millis},items.filter{it.evidence==Evidence.INFERRED}.sumOf{it.millis},unknown,if(pkg==null)cells.filter{it.app==SUMMARY}.sumOf{it.provisional}else items.sumOf{it.provisional})
+            return MetricSummary(items.filter{it.evidence==Evidence.CONFIRMED}.sumOf{it.millis},items.filter{it.evidence==Evidence.INFERRED}.sumOf{it.millis},unknown,if(pkg==null)cells.filter{it.app==SUMMARY}.sumOf{it.provisional}else cells.filter{it.app==pkg}.sumOf{it.provisional})
         }
         val slots=Reports.slots(window,zone,grain);val values=LongArray(slots.size);val missing=LongArray(slots.size);val observed=LongArray(slots.size)
         // A day cell may only be assigned to a containing bucket. HOUR is handled by raw slices instead.

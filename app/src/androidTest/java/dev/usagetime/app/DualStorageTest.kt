@@ -35,7 +35,7 @@ class DualStorageTest {
             db.execSQL("INSERT INTO apps VALUES('fixture','Fixture')")
             db.version=1
         }
-        val db=Room.databaseBuilder(context,UsageDatabase::class.java,name).addMigrations(DualMigration.FROM_1_TO_2).build()
+        val db=Room.databaseBuilder(context,UsageDatabase::class.java,name).addMigrations(DualMigration.FROM_1_TO_2,DualMigration.FROM_2_TO_3,DualMigration.FROM_3_TO_4,DualMigration.FROM_4_TO_5).build()
         assertEquals(1,db.usage().intervals(0,3000).size)
         assertEquals(1,db.usage().coverage(0,3000).size)
         assertEquals(2000L,db.usage().cursor()!!.time)

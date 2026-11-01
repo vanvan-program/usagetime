@@ -17,11 +17,57 @@ import java.util.UUID
 /** Synthetic event source is restricted to random safety-test databases by UsageStore. */
 @RunWith(AndroidJUnit4::class)
 class IncrementalSyncTest {
+ @Test fun detectedForwardClockJumpQuarantinesTheWholeUncertainRange()=runBlocking{fixture{store,_->
+  val base=System.currentTimeMillis()-600000;var wall=base+100;var elapsed=1000L
+  val raw=events(base).toMutableList()
+  store.useSyntheticSourceForTests({a,b,_->raw.asSequence().filter{it.time>=a&&it.time<b}},{ClockSample(wall,elapsed,"boot")})
+  store.collect()
+  raw+=listOf(DualCodec.event(base+110,Signal.SCREEN_ON,zone="UTC"),DualCodec.event(base+110,Signal.UNLOCK,zone="UTC"),
+   DualCodec.event(base+120,Signal.RESUME,"fixture.a","A",zone="UTC"),DualCodec.event(base+3600180,Signal.STOP,"fixture.a","A",zone="UTC"))
+  wall=base+3600200;elapsed+=100
+  store.collect()
+  val w=Window(base+100,wall)
+  val r=store.aggregate(w,java.time.ZoneId.of("UTC"),Grain.HOUR,UsageMetric.PRIMARY,null)
+  assertEquals(0L,r.total);assertEquals(w.duration,r.quality!!.unknown)
+  store.rebuildHistory()
+  assertEquals(r,store.aggregate(w,java.time.ZoneId.of("UTC"),Grain.HOUR,UsageMetric.PRIMARY,null))
+ }}
+ @Test fun unresolvedPublicClosureCannotFinalizeAnOwnFocusAsInferred()=runBlocking{fixture{store,_->
+  val base=System.currentTimeMillis()-600000;var wall=base+10;var elapsed=1000L;val pkg=context.packageName
+  val raw=mutableListOf(DualCodec.event(base,Signal.SCREEN_ON,zone="UTC"),DualCodec.event(base,Signal.UNLOCK,zone="UTC"),
+   DualCodec.event(base,Signal.RESUME,pkg,"A","one",EvidenceSource.OWN_WINDOW,"UTC"),
+   DualCodec.event(base,Signal.FOCUS_GAIN,pkg,"A","one",EvidenceSource.OWN_WINDOW,"UTC").copy(origin=DualCodec.encodeClock(ClockSample(base,990,"boot"))),
+   DualCodec.event(base,Signal.RESUME,pkg,"A",zone="UTC"))
+  store.useSyntheticSourceForTests({a,b,_->raw.asSequence().filter{it.time>=a&&it.time<b}},{ClockSample(wall,elapsed,"boot")})
+  store.collect()
+  raw+=listOf(DualCodec.event(base+20,Signal.PAUSE,pkg,"A",zone="UTC"),DualCodec.event(base+30,Signal.STOP,pkg,"A",zone="UTC"))
+  wall=base+40;elapsed+=30;store.collect()
+  val w=Window(base,base+10)
+  val before=store.aggregate(w,java.time.ZoneId.of("UTC"),Grain.DAY,UsageMetric.PRIMARY,pkg)
+  assertEquals(0L,before.total);assertEquals(10L,before.quality!!.unknown)
+  store.rebuildHistory()
+  assertEquals(before,store.aggregate(w,java.time.ZoneId.of("UTC"),Grain.DAY,UsageMetric.PRIMARY,pkg))
+ }}
+ @Test fun ownProcessMarkerPreventsOldFocusFromReturningAfterNewProcessStops()=runBlocking{fixture{store,_->
+  val base=System.currentTimeMillis()-600000;var wall=base+40
+  val raw=listOf(DualCodec.event(base,Signal.SCREEN_ON,zone="UTC"),DualCodec.event(base,Signal.UNLOCK,zone="UTC"))
+  store.useSyntheticSourceForTests({a,b,_->raw.asSequence().filter{it.time>=a&&it.time<b}},{ClockSample(wall,1000+wall-base,"boot")})
+  for(signal in listOf(Signal.RESUME,Signal.FOCUS_GAIN))
+   store.ownEvent(signal,"A","old/one",base+10,true,false,"old",base,ClockSample(base+10,1010,"boot"))
+  store.collect()
+  for(signal in listOf(Signal.RESUME,Signal.FOCUS_GAIN))
+   store.ownEvent(signal,"A","new/one",base+60,true,false,"new",base+50,ClockSample(base+60,1060,"boot"))
+  for(signal in listOf(Signal.FOCUS_LOSS,Signal.STOP))
+   store.ownEvent(signal,"A","new/one",base+80,true,false,"new",base+50,ClockSample(base+80,1080,"boot"))
+  wall=base+100;store.collect()
+  assertEquals(20L,total(store,base,wall,UsageMetric.PRIMARY,context.packageName))
+  assertEquals(0L,total(store,base+80,wall,UsageMetric.PRIMARY,context.packageName))
+ }}
  @Test fun inferredAndCombinedReportsUseSeparateCachesAcrossGrains()=runBlocking{fixture{store,_->
   val base=System.currentTimeMillis()-600000;val wall=base+200
   val raw=events(base)+listOf(
    DualCodec.event(base+100,Signal.RESUME,"fixture.a","Own","instance",EvidenceSource.OWN_WINDOW,"UTC"),
-   DualCodec.event(base+100,Signal.FOCUS_GAIN,"fixture.a","Own","instance",EvidenceSource.OWN_WINDOW,"UTC"),
+   DualCodec.event(base+100,Signal.FOCUS_GAIN,"fixture.a","Own","instance",EvidenceSource.OWN_WINDOW,"UTC").copy(origin=DualCodec.encodeClock(ClockSample(base+100,1000,"fixture-boot"))),
    DualCodec.event(base+150,Signal.FOCUS_LOSS,"fixture.a","Own","instance",EvidenceSource.OWN_WINDOW,"UTC"),
    DualCodec.event(base+150,Signal.STOP,"fixture.a","Own","instance",EvidenceSource.OWN_WINDOW,"UTC"))
   store.useSyntheticSourceForTests({a,b,_->raw.asSequence().filter{it.time>=a&&it.time<b}},{ClockSample(wall,1000,"fixture-boot")})
@@ -113,8 +159,8 @@ class IncrementalSyncTest {
   val base=System.currentTimeMillis()-600000;var wall=base+100;var elapsed=1000L;val raw=events(base)
   store.useSyntheticSourceForTests({a,b,_->raw.asSequence().filter{it.time>=a&&it.time<b}},{ClockSample(wall,elapsed,"fixture-boot")})
   store.collect()
-  for(signal in listOf(Signal.RESUME,Signal.FOCUS_GAIN))store.ownEvent(signal,"Fixture","own",base+50,true,false)
-  for(signal in listOf(Signal.FOCUS_LOSS,Signal.STOP))store.ownEvent(signal,"Fixture","own",base+150,true,false)
+  for(signal in listOf(Signal.RESUME,Signal.FOCUS_GAIN))store.ownEvent(signal,"Fixture","own",base+50,true,false,clock=ClockSample(base+50,950,"fixture-boot"))
+  for(signal in listOf(Signal.FOCUS_LOSS,Signal.STOP))store.ownEvent(signal,"Fixture","own",base+150,true,false,clock=ClockSample(base+150,1050,"fixture-boot"))
   assertEquals(base+50,progress(name).getLong("dirtyFrom"))
   wall+=100;elapsed+=100;store.collect();assertEquals(100L,total(store,base,wall,UsageMetric.PRIMARY,context.packageName))
   store.rebuildHistory();assertEquals(100L,total(store,base,wall,UsageMetric.PRIMARY,context.packageName))
@@ -134,12 +180,13 @@ class IncrementalSyncTest {
   assertEquals("已保存最新记录",store.collect());assertTrue(progress(name).isNull("dirtyFrom"))
  }}
 
- @Test fun continuousUseWithoutNewEventsExtendsTheOpenSessionExactly()=runBlocking{fixture{store,_->
+ @Test fun noNewEventsPreserveUnknownRatherThanInventContinuousUse()=runBlocking{fixture{store,_->
   val base=System.currentTimeMillis()-600000;var wall=base+100;var elapsed=1000L;val raw=events(base).take(3)
   store.useSyntheticSourceForTests({a,b,_->raw.asSequence().filter{it.time>=a&&it.time<b}},{ClockSample(wall,elapsed,"fixture-boot")})
   store.collect();wall+=100;elapsed+=100;store.collect()
-  assertEquals(190L,total(store,base,wall,UsageMetric.PRIMARY));assertEquals(190L,total(store,base,wall,UsageMetric.VISIBLE))
-  store.rebuildHistory();assertEquals(190L,total(store,base,wall,UsageMetric.PRIMARY));assertEquals(190L,total(store,base,wall,UsageMetric.VISIBLE))
+  assertEquals(0L,total(store,base,wall,UsageMetric.PRIMARY));assertEquals(0L,total(store,base,wall,UsageMetric.VISIBLE))
+  assertEquals(190L,store.aggregate(Window(base+10,wall),java.time.ZoneId.of("UTC"),Grain.DAY,UsageMetric.PRIMARY,null).quality!!.unknown)
+  store.rebuildHistory();assertEquals(0L,total(store,base,wall,UsageMetric.PRIMARY));assertEquals(0L,total(store,base,wall,UsageMetric.VISIBLE))
  }}
  @Test fun midStatsFailureRollsBackDerivedRowsAndLocalOnlyRetryCompletes()=runBlocking{fixture{store,name->
   val base=System.currentTimeMillis()-600000;var wall=base+100;var elapsed=1000L;val raw=events(base).toMutableList()
@@ -174,8 +221,8 @@ class IncrementalSyncTest {
   store.useSyntheticSourceForTests({_,_,_->throw java.io.IOException("platform unavailable")},{ClockSample(base+3*86400000L,50,"boot-b")})
   assertTrue(runCatching{store.collect()}.isFailure)
   assertEquals(base+200,latestTime(name))
-  assertEquals(190L,total(store,base,base+3*86400000L,UsageMetric.PRIMARY))
-  assertEquals(190L,total(store,base,base+3*86400000L,UsageMetric.VISIBLE))
+  assertEquals(0L,total(store,base,base+3*86400000L,UsageMetric.PRIMARY))
+  assertEquals(0L,total(store,base,base+3*86400000L,UsageMetric.VISIBLE))
   assertTrue(store.read(Window(base+200,base+3*86400000L)).slices.isEmpty())
   assertEquals(3*86400000L-200,store.aggregate(Window(base+200,base+3*86400000L),java.time.ZoneId.of("UTC"),Grain.DAY,UsageMetric.PRIMARY,null).quality!!.unknown)
  }}
@@ -189,10 +236,10 @@ class IncrementalSyncTest {
   val pending=progress(name).toString();store.onCollectPhaseForTests(null);wall=base+150
   store.retryPendingForTests()
   assertEquals(pending,progress(name).toString());assertEquals(base+100,latestTime(name))
-  assertEquals(90L,total(store,base,base+1000,UsageMetric.PRIMARY))
+  assertEquals(0L,total(store,base,base+1000,UsageMetric.PRIMARY))
   // Same-time retry is safe: the original acquisition was already completed at this exact wall time.
   wall=base+200;assertEquals("已根据本地事件更新统计",store.retryPendingForTests())
-  assertEquals(190L,total(store,base,base+1000,UsageMetric.PRIMARY));assertEquals(base+200,latestTime(name))
+  assertEquals(0L,total(store,base,base+1000,UsageMetric.PRIMARY));assertEquals(base+200,latestTime(name))
  }}
  @Test fun firstFailedSyncRetriesFromSavedQueryStartRatherThanEpoch()=runBlocking{fixture{store,name->
   val base=System.currentTimeMillis()-600000;val raw=events(base).take(3);var wall=base+100
@@ -203,7 +250,7 @@ class IncrementalSyncTest {
   store.onCollectPhaseForTests(null);wall+=100
   assertEquals("已根据本地事件更新统计",store.retryPendingForTests())
   assertEquals(base+100,latestTime(name));assertEquals(queryStart,store.first())
-  assertEquals(90L,total(store,base,base+1000,UsageMetric.PRIMARY))
+  assertEquals(0L,total(store,base,base+1000,UsageMetric.PRIMARY))
  }}
  @Test fun ownEvidenceBeyondAcquisitionRemainsPendingUntilNextQuery()=runBlocking{fixture{store,name->
   val base=System.currentTimeMillis()-600000;var wall=base+100;val raw=events(base).take(3)

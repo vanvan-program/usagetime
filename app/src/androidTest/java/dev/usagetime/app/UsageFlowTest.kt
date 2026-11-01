@@ -21,7 +21,7 @@ class UsageFlowTest {
         compose.onNodeWithText("搜索应用").performScrollTo().performTextInput("微信")
         compose.onNode(hasText("微信") and hasClickAction() and !hasSetTextAction()).performScrollTo().performClick()
         compose.onNodeWithContentDescription("返回应用列表").assertExists()
-        compose.onNodeWithText("可归属累计（含推断）").assertExists()
+        compose.onNodeWithText("主要使用时间 · 候选估计累计").assertExists()
         compose.onNodeWithText("对比",useUnmergedTree=true).performClick()
         compose.onNodeWithText("月对比").performClick()
         compose.onNodeWithText("月对比").assertIsSelected()
