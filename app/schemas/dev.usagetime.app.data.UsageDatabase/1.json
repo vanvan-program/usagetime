@@ -1,0 +1,185 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 1,
+    "identityHash": "b3ce0c71f903665c833dd8c067a21618",
+    "entities": [
+      {
+        "tableName": "intervals",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`app` TEXT NOT NULL, `start` INTEGER NOT NULL, `end` INTEGER NOT NULL, PRIMARY KEY(`app`, `start`, `end`))",
+        "fields": [
+          {
+            "fieldPath": "app",
+            "columnName": "app",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "start",
+            "columnName": "start",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "end",
+            "columnName": "end",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "app",
+            "start",
+            "end"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_intervals_start",
+            "unique": false,
+            "columnNames": [
+              "start"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_intervals_start` ON `${TABLE_NAME}` (`start`)"
+          },
+          {
+            "name": "index_intervals_end",
+            "unique": false,
+            "columnNames": [
+              "end"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_intervals_end` ON `${TABLE_NAME}` (`end`)"
+          }
+        ]
+      },
+      {
+        "tableName": "coverage",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`start` INTEGER NOT NULL, `end` INTEGER NOT NULL, `reliable` INTEGER NOT NULL, PRIMARY KEY(`start`, `end`))",
+        "fields": [
+          {
+            "fieldPath": "start",
+            "columnName": "start",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "end",
+            "columnName": "end",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "reliable",
+            "columnName": "reliable",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "start",
+            "end"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_coverage_end",
+            "unique": false,
+            "columnNames": [
+              "end"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_coverage_end` ON `${TABLE_NAME}` (`end`)"
+          }
+        ]
+      },
+      {
+        "tableName": "cursor",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER NOT NULL, `time` INTEGER NOT NULL, `app` TEXT NOT NULL, `activity` TEXT NOT NULL, `since` INTEGER NOT NULL, `blocked` INTEGER NOT NULL, `known` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "time",
+            "columnName": "time",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "app",
+            "columnName": "app",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "activity",
+            "columnName": "activity",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "since",
+            "columnName": "since",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "blocked",
+            "columnName": "blocked",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "known",
+            "columnName": "known",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        }
+      },
+      {
+        "tableName": "apps",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`app` TEXT NOT NULL, `label` TEXT NOT NULL, PRIMARY KEY(`app`))",
+        "fields": [
+          {
+            "fieldPath": "app",
+            "columnName": "app",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "label",
+            "columnName": "label",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "app"
+          ]
+        }
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'b3ce0c71f903665c833dd8c067a21618')"
+    ]
+  }
+}

@@ -1,0 +1,10 @@
+<resources>
+    <style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:colorAccent">#3F56B5</item>
+    </style>
+    <style name="DateDialogLight" parent="android:style/Theme.Material.Light.Dialog.Alert"><item name="android:colorAccent">#3F56B5</item></style>
+    <style name="DateDialogDark" parent="android:style/Theme.Material.Dialog.Alert"><item name="android:colorAccent">#9BAAF0</item></style>
+</resources>
