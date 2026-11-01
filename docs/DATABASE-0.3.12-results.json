@@ -1,0 +1,157 @@
+{
+  "generated_at": "2026-11-01T12:00:45.504686+00:00",
+  "sqlite_version": "3.40.1",
+  "method": "Synthetic data only; host SQLite; WAL+FULL; warm OS-cache query timings; no Android/device claims",
+  "migration_tests": [
+    "v1->v6: all existing tables/values preserved; columns, primary keys and indexes match exported Room schema",
+    "v2->v6: all existing tables/values preserved; columns, primary keys and indexes match exported Room schema",
+    "v3->v6: all existing tables/values preserved; columns, primary keys and indexes match exported Room schema",
+    "v4->v6: all existing tables/values preserved; columns, primary keys and indexes match exported Room schema",
+    "v5->v6: all existing tables/values preserved; columns, primary keys and indexes match exported Room schema"
+  ],
+  "crash_tests": [
+    "archive_uncommitted: forced process exit, reopen integrity OK; atomic floor/deletion; cutoff boundary and imported evidence retained",
+    "archive_committed: forced process exit, reopen integrity OK; atomic floor/deletion; cutoff boundary and imported evidence retained",
+    "events_deleted: forced process exit, reopen integrity OK; atomic floor/deletion; cutoff boundary and imported evidence retained",
+    "slices_deleted: forced process exit, reopen integrity OK; atomic floor/deletion; cutoff boundary and imported evidence retained",
+    "floor_written: forced process exit, reopen integrity OK; atomic floor/deletion; cutoff boundary and imported evidence retained",
+    "committed: forced process exit, reopen integrity OK; atomic floor/deletion; cutoff boundary and imported evidence retained"
+  ],
+  "benchmarks": [
+    {
+      "apps_per_day": 20,
+      "sessions_per_day": 1000,
+      "calendar_days": 3652,
+      "retained_detail_days": 90,
+      "counts": {
+        "history_days": 160688,
+        "history_seals": 7304,
+        "usage_events": 180000,
+        "usage_intervals": 180000
+      },
+      "database_bytes": 197840896,
+      "gzip_jsonl_bytes": 22394317,
+      "build_seconds": 52.68,
+      "queries": {
+        "one_day_archive": {
+          "median_ms": 0.134,
+          "p95_ms": 0.162,
+          "runs": 21
+        },
+        "one_year_both_metrics_sql_daily_loop": {
+          "median_ms": 64.196,
+          "p95_ms": 74.369,
+          "runs": 3
+        },
+        "ten_years_both_metrics_sql_daily_loop": {
+          "median_ms": 669.429,
+          "p95_ms": 673.018,
+          "runs": 3
+        },
+        "ten_years_both_metrics_with_python_digest_validation": {
+          "median_ms": 1408.042,
+          "p95_ms": 1444.773,
+          "runs": 3
+        },
+        "recent_day_detail": {
+          "median_ms": 2.951,
+          "p95_ms": 8.636,
+          "runs": 21
+        },
+        "recent_day_detail_before_fix": {
+          "median_ms": 251.28,
+          "p95_ms": 264.669,
+          "runs": 5
+        },
+        "ten_year_range_sql_potential_only": {
+          "median_ms": 402.548,
+          "p95_ms": 442.471,
+          "runs": 5
+        },
+        "oldest_retained_day_detail_start_edge": {
+          "median_ms": 1.399,
+          "p95_ms": 1.56,
+          "runs": 21
+        }
+      },
+      "archive_query_plan": [
+        "SEARCH history_days USING INDEX sqlite_autoindex_history_days_1 (zone=? AND dayStart=? AND metric=?)"
+      ],
+      "detail_query_plan": [
+        "SEARCH usage_intervals USING INDEX index_usage_intervals_metric_end_start (metric=? AND end>?)",
+        "USE TEMP B-TREE FOR ORDER BY"
+      ],
+      "page_bytes_by_object": {},
+      "five_year_archive_estimate_bytes": 17250304,
+      "ten_year_archive_only_measured_bytes": 34500608
+    },
+    {
+      "apps_per_day": 100,
+      "sessions_per_day": 3000,
+      "calendar_days": 3652,
+      "retained_detail_days": 90,
+      "counts": {
+        "history_days": 745008,
+        "history_seals": 7304,
+        "usage_events": 540000,
+        "usage_intervals": 540000
+      },
+      "database_bytes": 647917568,
+      "gzip_jsonl_bytes": 70243536,
+      "build_seconds": 168.25,
+      "queries": {
+        "one_day_archive": {
+          "median_ms": 0.381,
+          "p95_ms": 1.074,
+          "runs": 21
+        },
+        "one_year_both_metrics_sql_daily_loop": {
+          "median_ms": 285.082,
+          "p95_ms": 302.387,
+          "runs": 3
+        },
+        "ten_years_both_metrics_sql_daily_loop": {
+          "median_ms": 2765.773,
+          "p95_ms": 2806.717,
+          "runs": 3
+        },
+        "ten_years_both_metrics_with_python_digest_validation": {
+          "median_ms": 5853.857,
+          "p95_ms": 5944.631,
+          "runs": 3
+        },
+        "recent_day_detail": {
+          "median_ms": 17.62,
+          "p95_ms": 34.934,
+          "runs": 21
+        },
+        "recent_day_detail_before_fix": {
+          "median_ms": 733.787,
+          "p95_ms": 872.617,
+          "runs": 5
+        },
+        "ten_year_range_sql_potential_only": {
+          "median_ms": 2105.154,
+          "p95_ms": 2186.835,
+          "runs": 5
+        },
+        "oldest_retained_day_detail_start_edge": {
+          "median_ms": 6.722,
+          "p95_ms": 7.672,
+          "runs": 21
+        }
+      },
+      "archive_query_plan": [
+        "SEARCH history_days USING INDEX sqlite_autoindex_history_days_1 (zone=? AND dayStart=? AND metric=?)"
+      ],
+      "detail_query_plan": [
+        "SEARCH usage_intervals USING INDEX index_usage_intervals_metric_end_start (metric=? AND end>?)",
+        "USE TEMP B-TREE FOR ORDER BY"
+      ],
+      "page_bytes_by_object": {},
+      "five_year_archive_estimate_bytes": 78825472,
+      "ten_year_archive_only_measured_bytes": 157650944
+    }
+  ],
+  "interval_queries_test": "10 half-open overlap/metric/cross-day/long-span cases: both production index paths agree"
+}

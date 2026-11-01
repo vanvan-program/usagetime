@@ -137,7 +137,8 @@ exists=next(q for q in re.findall(r'@Query\("([^"\n]+)"\)',store_source) if q.st
 assert fixture.execute(exists,dict(start=2000,end=3000)).fetchone()[0]==0
 assert fixture.execute(exists,dict(start=1999,end=2000)).fetchone()[0]==1
 print('PASS: legacy existence query respects half-open boundaries without loading records')
-metric_query=next(q for q in maintenance_queries if q.startswith('SELECT * FROM usage_intervals WHERE metric='))
+db.execute("CREATE INDEX IF NOT EXISTS index_usage_intervals_metric_end_start ON usage_intervals(metric, `end`, start)")
+metric_query=next(q for q in maintenance_queries if q.startswith('SELECT * FROM usage_intervals INDEXED BY'))
 assert all(row[1]=='VISIBLE' for row in db.execute(metric_query,dict(start=0,end=6000,metric='VISIBLE')))
 assert len(db.execute(metric_query,dict(start=0,end=6000,metric='VISIBLE')).fetchall())==1
 print('PASS: production history query isolates metrics before interval decoding')

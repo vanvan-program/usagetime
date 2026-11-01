@@ -35,7 +35,7 @@ class DualStorageTest {
             db.execSQL("INSERT INTO apps VALUES('fixture','Fixture')")
             db.version=1
         }
-        val db=Room.databaseBuilder(context,UsageDatabase::class.java,name).addMigrations(DualMigration.FROM_1_TO_2,DualMigration.FROM_2_TO_3,DualMigration.FROM_3_TO_4,DualMigration.FROM_4_TO_5).build()
+        val db=Room.databaseBuilder(context,UsageDatabase::class.java,name).addMigrations(DualMigration.FROM_1_TO_2,DualMigration.FROM_2_TO_3,DualMigration.FROM_3_TO_4,DualMigration.FROM_4_TO_5,HistoryMigration.FROM_5_TO_6).build()
         assertEquals(1,db.usage().intervals(0,3000).size)
         assertEquals(1,db.usage().coverage(0,3000).size)
         assertEquals(2000L,db.usage().cursor()!!.time)
@@ -61,7 +61,7 @@ class DualStorageTest {
         store.importJson(backup);store.importJson(backup)
         val read=store.read(Window(0,3000),UsageMetric.PRIMARY)
         assertEquals(1000L,read.intervals.sumOf{it.end-it.start});assertTrue(read.slices.all{it.evidence!=Evidence.CONFIRMED})
-        val exported=store.exportJson();assertEquals(2,JSONObject(exported).getInt("version"));assertTrue(exported.contains("originalEvidence"))
+        val exported=store.exportJson();assertEquals(3,JSONObject(exported).getInt("version"));assertTrue(exported.contains("originalEvidence"))
         val before=store.readLegacy(Window(0,3000)).intervals.size
         val invalid="""{"format":"usagetime-backup","version":1,"intervals":[{"app":"fixture","start":1000,"end":2000},{"app":"bad","start":1000,"end":-1}]}"""
         assertTrue(runCatching{store.importJson(invalid)}.isFailure);assertEquals(before,store.readLegacy(Window(0,3000)).intervals.size)

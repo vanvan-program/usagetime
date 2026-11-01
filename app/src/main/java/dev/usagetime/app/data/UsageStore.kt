@@ -53,8 +53,8 @@ interface UsageDao {
     @Insert(onConflict=OnConflictStrategy.REPLACE) suspend fun cursor(value:Cursor)
     @Insert(onConflict=OnConflictStrategy.REPLACE) suspend fun apps(values:List<SavedApp>)
 }
-@Database(entities=[SavedInterval::class,SavedCoverage::class,Cursor::class,SavedApp::class,StoredEvent::class,StoredSlice::class,DailyUsage::class,HourUsage::class,MonthUsage::class,SyncCheckpoint::class,DiagnosticLog::class],version=5,exportSchema=true)
-abstract class UsageDatabase:RoomDatabase(){abstract fun usage():UsageDao;abstract fun dual():DualDao}
+@Database(entities=[SavedInterval::class,SavedCoverage::class,Cursor::class,SavedApp::class,StoredEvent::class,StoredSlice::class,DailyUsage::class,HourUsage::class,MonthUsage::class,SyncCheckpoint::class,DiagnosticLog::class,HistoryDay::class,HistorySeal::class,RetentionState::class],version=6,exportSchema=true)
+abstract class UsageDatabase:RoomDatabase(){abstract fun usage():UsageDao;abstract fun dual():DualDao;abstract fun history():HistoryDao}
 data class Records(val intervals:List<Interval>,val coverage:List<Coverage>,val slices:List<UsageSlice> = emptyList())
 
 class UsageStore(private val context:Context,databaseName:String="usage-history.db") {
@@ -68,7 +68,7 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
     private val recovery=LocalRecovery(File(context.noBackupFilesDir,"recovery-$databaseName"),databaseFile,
         available={StatFs(context.filesDir.absolutePath).availableBytes},syncDirectory=::syncFolder)
     private fun openDatabase(name:String)=Room.databaseBuilder(context,UsageDatabase::class.java,name)
-        .addMigrations(DualMigration.FROM_1_TO_2,DualMigration.FROM_2_TO_3,DualMigration.FROM_3_TO_4,DualMigration.FROM_4_TO_5).openHelperFactory(PreservingOpenHelperFactory()).setJournalMode(RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
+        .addMigrations(DualMigration.FROM_1_TO_2,DualMigration.FROM_2_TO_3,DualMigration.FROM_3_TO_4,DualMigration.FROM_4_TO_5,HistoryMigration.FROM_5_TO_6).openHelperFactory(PreservingOpenHelperFactory()).setJournalMode(RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
         .addCallback(object:RoomDatabase.Callback(){
             private fun guard(){
                 if(name==databaseFile.name&&recoveryIssue!=null)throw android.database.sqlite.SQLiteDatabaseCorruptException("恢复尚未完成，原文件已保留：$recoveryIssue")
@@ -91,6 +91,7 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
     }
     private val dao get()=database.usage()
     private val dual get()=database.dual()
+    private val dualHistory get()=database.history()
     private val mutex=Mutex()
     private data class ReportKey(val window:Window,val zone:String,val grain:Grain,val metric:UsageMetric?,val app:String?,val includeConfirmed:Boolean=true)
     private val reportCache=ReportCache<ReportKey>()
@@ -164,17 +165,41 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
             result
         }finally{database=openDatabase(databaseFile.name)}
     }
+    private suspend fun archiveBeforeCleanup(now:Long,zone:ZoneId){
+        val progress=DualCodec.decodeProgress(dual.replayMetadata())
+        if(!progress.initialized||progress.dirtyFrom!=null)return
+        val latest=dual.latest()?:return
+        val cutoff=minOf(HistoryRetention.cutoff(now,zone),Dates.midnight(Dates.date(latest.time,zone),zone))
+        val first=listOfNotNull<Long>(dualHistory.first(),dual.first(),dual.firstEvent()).minOrNull()?.let{Dates.midnight(Dates.date(it,zone),zone)}?:return
+        var day=first
+        while(day<cutoff){
+            currentCoroutineContext().ensureActive()
+            for(metric in UsageMetric.entries){
+                if(dualHistory.seal(zone.id,day,metric.name)!=null)continue
+                val window=Window(day,Dates.midnight(Dates.date(day,zone).plusDays(1),zone))
+                // Summary persistence is in this same maintenance transaction as deletion.
+                HistoryRetention.save(database,HistoryRetention.rows(calculateDay(window,metric),metric,zone))
+            }
+            day=Dates.midnight(Dates.date(day,zone).plusDays(1),zone)
+        }
+    }
     private suspend fun maintainAndSnapshot(force:Boolean=false){
         try{
             val elapsed=SystemClock.elapsedRealtime()
             val boot=Settings.Global.getInt(context.contentResolver,Settings.Global.BOOT_COUNT,-1)
             // Sync remains immediate. Only housekeeping scans use a six-hour cadence.
             if(force||ElapsedMaintenance.due(elapsed,boot,preferences.getLong("maintenance-elapsed",-1),preferences.getInt("maintenance-boot",-2))){
+                val now=System.currentTimeMillis();val zone=ZoneId.systemDefault()
+                database.withTransaction{archiveBeforeCleanup(now,zone)}
+                try{database.withTransaction{HistoryRetention.compact(database,now,zone)}}
+                catch(e:IllegalArgumentException){log(now,"CLEANUP_DEFERRED",e.message?:"保留明细")}
+                catch(e:IllegalStateException){log(now,"CLEANUP_DEFERRED",e.message?:"保留明细")}
                 database.withTransaction{
                     dual.trimCache(ZoneId.systemDefault().id)
                     dual.trimHourCache(ZoneId.systemDefault().id)
                     dual.trimMonthCache(ZoneId.systemDefault().id)
-                    dual.compactCheckpoints(System.currentTimeMillis()-14*86400000L)
+                    // Keep civil-midnight replay anchors, including a previously committed retention floor.
+                    database.openHelper.writableDatabase.execSQL("DELETE FROM sync_checkpoints WHERE algorithm=2 AND time<? AND time NOT IN (SELECT MAX(time) FROM sync_checkpoints WHERE algorithm=2 GROUP BY time/86400000) AND time NOT IN (SELECT MIN(time) FROM sync_checkpoints WHERE algorithm=2 GROUP BY time/86400000) AND time NOT IN (SELECT floor FROM retention_state)",arrayOf(now-100*86400000L))
                     dual.trimDiagnostics(listOf("STATE_RESET","RETENTION_GAP","BOOT_CHANGED","WALL_CLOCK_BACKWARD","WALL_CLOCK_DISCONTINUITY","PERMISSION_INTERRUPTION","PERMISSION_DENIED","SYNC_DELAY","EMPTY_SYSTEM_QUERY","HISTORY_REBUILT","BACKUP_IMPORTED","SYNC_COMMITTED","RECOVERY_SNAPSHOT"))
                 }
                 preferences.edit().putLong("maintenance-elapsed",elapsed).putInt("maintenance-boot",boot).apply()
@@ -188,9 +213,10 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         // Never let Room turn an empty/unversioned candidate into an apparently healthy new DB.
         android.database.sqlite.SQLiteDatabase.openDatabase(file.absolutePath,null,android.database.sqlite.SQLiteDatabase.OPEN_READONLY,android.database.DatabaseErrorHandler{throw android.database.sqlite.SQLiteDatabaseCorruptException("恢复候选损坏，原文件保留")}).use{raw->
             val required=mutableSetOf("intervals","coverage","cursor","apps")
-            require(raw.version in 1..5){"安全副本数据库版本不受支持"}
+            require(raw.version in 1..6){"安全副本数据库版本不受支持"}
             if(raw.version>=2)required+=listOf("usage_events","usage_intervals","daily_usage","sync_checkpoints","diagnostic_logs")
             if(raw.version>=3)required+=listOf("hour_usage","month_usage")
+            if(raw.version>=6)required+=listOf("history_days","history_seals","retention_state")
             raw.rawQuery("SELECT name FROM sqlite_master WHERE type='table'",null).use{c->while(c.moveToNext())required.remove(c.getString(0))}
             require(required.isEmpty()){ "安全副本缺少历史数据表，已停止替换" }
         }
@@ -226,14 +252,18 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         val ops=context.getSystemService(AppOpsManager::class.java)
         return ops.checkOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS,Process.myUid(),context.packageName)==AppOpsManager.MODE_ALLOWED
     }
-    suspend fun first():Long?=withContext(Dispatchers.IO){mutex.withLock{listOfNotNull(dao.first(),dual.first()).minOrNull()}}
+    suspend fun first():Long?=withContext(Dispatchers.IO){mutex.withLock{listOfNotNull<Long>(dao.first(),dual.first(),dualHistory.first()).minOrNull()}}
     suspend fun last():Long?=withContext(Dispatchers.IO){mutex.withLock{dual.latest()?.time?:dao.cursor()?.time}}
     suspend fun hasLegacy(window:Window):Boolean=withContext(Dispatchers.IO){mutex.withLock{dao.hasIntervals(window.start,window.end)}}
     suspend fun readLegacy(window:Window):Records=withContext(Dispatchers.IO){mutex.withLock{database.withTransaction{
         Records(dao.intervals(window.start,window.end).map{Interval(it.app,it.start,it.end)},dao.coverage(window.start,window.end).map{Coverage(it.start,it.end,it.reliable)})
     }}}
     private suspend fun readInsideTransaction(window:Window,metric:UsageMetric):Records{
-        val observations=DualCodec.effective(dual.slices(window.start,window.end,metric.name))
+        val first=dual.first();val last=dual.latest()?.time
+        // Prefer the nearest indexed edge: forcing an end range for old dates scans all newer detail.
+        val values=if(first!=null&&last!=null&&window.start>=first+(last-first)/2)
+            dual.recentSlices(window.start,window.end,metric.name)else dual.slices(window.start,window.end,metric.name)
+        val observations=DualCodec.effective(values)
         return Records(observations.filter{it.app!=null&&it.evidence in setOf(Evidence.CONFIRMED,Evidence.INFERRED)}.map{Interval(it.app!!,it.start,it.end)},observations.filter{it.evidence==Evidence.CONFIRMED&&!it.provisional}.map{Coverage(it.start,it.end,true)},observations)
     }
     suspend fun read(window:Window,metric:UsageMetric=UsageMetric.PRIMARY):Records=withContext(Dispatchers.IO){mutex.withLock{database.withTransaction{readInsideTransaction(window,metric)}}}
@@ -272,6 +302,17 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
     private suspend fun dailyCells(slot:Window,metric:UsageMetric,zone:ZoneId,budget:CacheBudget):List<MetricDayCell>{
         val stored=dual.daily(slot.start,slot.end,zone.id,metric.name)
         if(stored.any{it.app==DailyMetrics.SUMMARY})return stored.map{MetricDayCell(it.dayStart,it.dayEnd,it.app,Evidence.valueOf(it.evidence),it.millis,it.provisionalMillis)}
+        // Durable rows outlive both cache trimming and the 90-day detail window.
+        val seal=dualHistory.seal(zone.id,slot.start,metric.name)
+        if(seal!=null&&seal.dayEnd==slot.end){
+            val rows=dualHistory.rows(zone.id,slot.start,metric.name)
+            HistoryRetention.validate(rows,seal)
+            return rows.map{
+                val grade=if(seal.origin=="IMPORTED"&&it.app!=DailyMetrics.OBSERVED&&it.evidence==Evidence.CONFIRMED.name)Evidence.INFERRED else Evidence.valueOf(it.evidence)
+                MetricDayCell(it.dayStart,it.dayEnd,it.app,grade,if(seal.origin=="IMPORTED"&&it.app==DailyMetrics.OBSERVED)0 else it.millis,it.provisionalMillis)
+            }
+        }
+        require(slot.start>=(dualHistory.state()?.floor?:0)){"此历史范围仅保留原记录时区的完整每日汇总，无法还原部分日期"}
         val calculated=calculateDay(slot,metric)
         if(storageWritable()&&budget.allow(slot.start)){
             dual.daily(dayRows(calculated,metric,zone))
@@ -284,6 +325,7 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
     private suspend fun hourlyCells(slot:Window,metric:UsageMetric,zone:ZoneId,budget:CacheBudget):List<MetricDayCell>{
         val stored=dual.hourly(slot.start,slot.end,zone.id,metric.name)
         if(stored.any{it.app==DailyMetrics.SUMMARY})return stored.map{MetricDayCell(it.hourStart,it.hourEnd,it.app,Evidence.valueOf(it.evidence),it.millis,it.provisionalMillis)}
+        require(slot.start>=(dualHistory.state()?.floor?:0)){"90天以前请查看每日或每月汇总"}
         val data=readInsideTransaction(slot,metric)
         val calculated=DailyMetrics.cells(data.slices,metric,slot)
         if(storageWritable()&&budget.allow(slot.start)){
@@ -525,6 +567,8 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         if(previousEnd!=null&&start<previousEnd){
             dual.deleteRecent(start);dual.deleteCheckpointsAfter(start)
         }
+        // A changed replay domain invalidates both caches and every durable day it can touch.
+        HistoryRetention.invalidate(database,Dates.midnight(Dates.date(start,zone),zone))
         collectPhaseListener?.invoke("stats")
         var at=start
         var state=initial
@@ -558,8 +602,12 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
                 val hourCells=Reports.slots(daySlot,zone,Grain.HOUR).filter{it.end>start&&it.end>hourCacheFloor}.map{h->h to DailyMetrics.cells(data.slices,metric,h)}
                 // Partial tail hours keep their actual bounds; very old spans stay slice-computed to bound write amplification.
                 dual.hourly(hourCells.flatMap{(_,c)->hourRows(c,metric,zone)})
-                val rows=dayRows(DailyMetrics.cells(data.slices,metric,daySlot),metric,zone)
+                val cells=DailyMetrics.cells(data.slices,metric,daySlot)
+                val rows=dayRows(cells,metric,zone)
                 dual.daily(rows);dayBudget.record(rows.size,daySlot.start)
+                // The durable day summary and the detail replay commit atomically.
+                if(daySlot.end==Dates.midnight(Dates.date(daySlot.start,zone).plusDays(1),zone))
+                    HistoryRetention.save(database,HistoryRetention.rows(cells,metric,zone))
             }
         }
         for(monthSlot in Reports.slots(Window(monthStart,now),zone,Grain.MONTH)){
@@ -617,7 +665,10 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
             dual.finalizeEvidence(c.metric.name,c.app,c.origin,c.at,c.evidence.name,prefix,","+c.endRef)
             invalidate=minOf(invalidate?:earliest,earliest)
         }
-        invalidate?.let{dual.deleteDaysFrom(it);dual.deleteHoursFrom(it);dual.deleteMonthsFrom(it)}
+        invalidate?.let{
+            dual.deleteDaysFrom(it);dual.deleteHoursFrom(it);dual.deleteMonthsFrom(it)
+            HistoryRetention.invalidate(database,it)
+        }
     }
     /** Bounded-memory replay of saved evidence; never asks the platform to recover years-old events. */
     private suspend fun saveEvidenceRevision(){
@@ -627,12 +678,15 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
     private suspend fun rebuildHistoryInsideLock():String{
         ensureWriteSpace();invalidateReports();snapshotInsideLock(true)
         return database.withTransaction{
-        val first=dual.firstEvent()?:return@withTransaction "尚无已保存原始事件"
+        val floor=dualHistory.state()?.floor
+        val first=floor?:dual.firstEvent()?:return@withTransaction "尚无已保存原始事件"
         val last=dual.latest()?:return@withTransaction "尚无同步检查点"
-        val end=last.time;var at=first;var state=EngineState();val step=6*3_600_000L
+        val seed=if(floor!=null)dual.checkpoint(floor)?.takeIf{it.time==floor}?.let{DualCodec.decode(it.state)}?:error("缺少压缩边界检查点")else EngineState()
+        val end=last.time;var at=first;var state=seed;val step=6*3_600_000L
         val homes=context.packageManager.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME),0).map{it.activityInfo.packageName}.toSet()+"com.android.systemui"
-        dual.deleteRecent(first);dual.deleteCheckpointsAfter(first);dual.deleteDaysFrom(0);dual.deleteHoursFrom(0);dual.deleteMonthsFrom(0)
-        dual.checkpoint(SyncCheckpoint(first,DualCodec.encode(EngineState()),first,-1,last.boot,last.zone))
+        HistoryRetention.invalidate(database,first)
+        dual.deleteRecent(first);dual.deleteCheckpointsAfter(first);dual.deleteDaysFrom(first);dual.deleteHoursFrom(first);dual.deleteMonthsFrom(first)
+        dual.checkpoint(SyncCheckpoint(first,DualCodec.encode(seed),first,-1,last.boot,last.zone))
         while(at<end){
             currentCoroutineContext().ensureActive();ensureWriteSpace()
             val next=minOf(end,at+step);val events=dual.events(at,next).map{it.event()}
@@ -654,8 +708,8 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
     /** Streaming SQLite snapshot. Database/OS credentials and the active checkpoint are not restored. */
     suspend fun writeBackup(output:java.io.OutputStream)=withContext(Dispatchers.IO){mutex.withLock{database.withTransaction{
         val writer=android.util.JsonWriter(java.io.OutputStreamWriter(output,Charsets.UTF_8))
-        writer.beginObject().name("format").value("usagetime-backup").name("version").value(2L).name("exportedAt").value(System.currentTimeMillis())
-        val tables=listOf("intervals","coverage","apps","usage_events","usage_intervals","sync_checkpoints","diagnostic_logs")
+        writer.beginObject().name("format").value("usagetime-backup").name("version").value(3L).name("exportedAt").value(System.currentTimeMillis())
+        val tables=listOf("intervals","coverage","apps","usage_events","usage_intervals","history_days","history_seals","retention_state","sync_checkpoints","diagnostic_logs")
         for(table in tables){
             writer.name(table).beginArray()
             var exported=0L
@@ -680,7 +734,13 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         val first=buffered.read();val second=buffered.read();buffered.reset()
         val decoded=if(first==0x1f&&second==0x8b)java.util.zip.GZIPInputStream(buffered,65536)else buffered
         val reader=android.util.JsonReader(java.io.InputStreamReader(decoded,Charsets.UTF_8));reader.isLenient=false
-        var format="";var version=0;var imported=0L;var recordCount=0L
+        var format="";var version=0;var imported=0L;var recordCount=0L;var importedDetailStart:Long?=null
+        val raw=database.openHelper.writableDatabase
+        raw.execSQL("CREATE TEMP TABLE IF NOT EXISTS incoming_days AS SELECT * FROM history_days WHERE 0")
+        raw.execSQL("CREATE TEMP TABLE IF NOT EXISTS incoming_seals AS SELECT * FROM history_seals WHERE 0")
+        raw.execSQL("DELETE FROM incoming_days");raw.execSQL("DELETE FROM incoming_seals")
+        raw.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS temp.incoming_day_key ON incoming_days(zone,dayStart,metric,appKey,evidence)")
+        raw.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS temp.incoming_seal_key ON incoming_seals(zone,dayStart,metric)")
         val eventBatch=ArrayList<StoredEvent>();val sliceBatch=ArrayList<StoredSlice>();val legacyBatch=ArrayList<SavedInterval>();var batchBytes=0L
         suspend fun flushBatches(){
             if(eventBatch.isNotEmpty()){dual.events(eventBatch);eventBatch.clear()}
@@ -708,7 +768,7 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
             "format"->format=reader.nextString()
             "version"->version=reader.nextInt()
             "exportedAt"->{reader.skipValue()}
-            "intervals","coverage","apps","usage_events","usage_intervals","sync_checkpoints","diagnostic_logs"->{
+            "intervals","coverage","apps","usage_events","usage_intervals","history_days","history_seals","retention_state","sync_checkpoints","diagnostic_logs"->{
                 reader.beginArray();while(reader.hasNext()){
                     recordCount++
                     if(recordCount%1000==0L){currentCoroutineContext().ensureActive();ensureWriteSpace()}
@@ -724,11 +784,27 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
                         }
                         "usage_intervals"->{
                             val a=row.getLong("start");val b=row.getLong("end");valid(a,b);val metric=UsageMetric.valueOf(row.getString("metric"));val original=Evidence.valueOf(row.getString("evidence"))
+                            importedDetailStart=minOf(importedDetailStart?:a,a)
                             val pkg=if(row.isNull("app"))null else row.getString("app");require(pkg==null||pkg.length<=255)
                             val grade=if(original==Evidence.CONFIRMED||original==Evidence.INFERRED)Evidence.INFERRED else original
                             val id="archive:"+row.getString("id").removePrefix("archive:")
                             sliceBatch+=StoredSlice(id,metric.name,pkg,a,b,grade.name,DualCodec.importReason(row.getString("reason"),original.name,row.getString("sources")),EvidenceSource.LEGACY_IMPORT.name,row.optString("refs","").split(',').filter{it.isNotBlank()}.joinToString(","){"archive:"+it.removePrefix("archive:")},row.optBoolean("provisional",false),0);batchBytes+=row.toString().length*2L;imported++
                         }
+                        "history_days"->{
+                            val a=row.getLong("dayStart");val b=row.getLong("dayEnd");valid(a,b)
+                            val app=if(row.isNull("app"))null else row.getString("app");require(app==null||app.length<=255)
+                            require(row.getString("appKey")==HistoryRetention.appKey(app))
+                            raw.execSQL("INSERT INTO incoming_days VALUES(?,?,?,?,?,?,?,?,?,?)",arrayOf<Any?>(
+                                row.getString("zone"),a,row.getString("metric"),row.getString("appKey"),row.getString("evidence"),b,
+                                app,row.getLong("millis"),row.getLong("provisionalMillis"),row.getInt("algorithm")))
+                            imported++
+                        }
+                        "history_seals"->{
+                            raw.execSQL("INSERT INTO incoming_seals VALUES(?,?,?,?,?,?,?)",arrayOf(
+                                row.getString("zone"),row.getLong("dayStart"),row.getString("metric"),row.getLong("dayEnd"),
+                                row.getLong("rows"),row.getString("digest"),"IMPORTED"))
+                        }
+                        "retention_state"->Unit // Imported metadata never authorizes local deletion.
                         "diagnostic_logs"->Unit // Incoming diagnostics remain in the backup; do not impersonate local audit entries.
                         "sync_checkpoints"->Unit // Checkpoints are device-local and must never be activated from a backup.
                     }
@@ -737,8 +813,15 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
             }
             else->reader.skipValue()
         }
-        reader.endObject();require(format=="usagetime-backup"&&version in 1..2){"不是受支持的用时记备份"}
+        reader.endObject();require(format=="usagetime-backup"&&version in 1..3){"不是受支持的用时记备份"}
         require(reader.peek()==android.util.JsonToken.END_DOCUMENT){"备份存在额外内容"}
+        importedDetailStart?.let{
+            // Keep immutable compacted days; reject an ambiguous merge rather than replace a total with a fragment.
+            require(it>=(dualHistory.state()?.floor?:0)){"备份明细涉及已压缩历史，请在独立安装中恢复"}
+            HistoryRetention.invalidate(database,it)
+        }
+        HistoryRetention.mergeImport(database)
+        raw.execSQL("DELETE FROM incoming_days");raw.execSQL("DELETE FROM incoming_seals")
         dual.deleteDaysFrom(0);dual.deleteHoursFrom(0);dual.deleteMonthsFrom(0)
         log(System.currentTimeMillis(),"BACKUP_IMPORTED","$imported records; imported evidence cannot become locally confirmed; live checkpoints retained")
         imported

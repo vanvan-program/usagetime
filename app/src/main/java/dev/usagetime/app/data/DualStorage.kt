@@ -13,7 +13,7 @@ data class StoredEvent(@PrimaryKey val id:String,val time:Long,val signal:String
         if(source=="OWN_WINDOW"&&app=="dev.usagetime.app"&&activity=="kotlinx.coroutines.StandaloneCoroutine")"$app.MainActivity"else activity,
         instance,EvidenceSource.valueOf(source))
 }
-@Entity(tableName="usage_intervals",indices=[Index("start"),Index("end"),Index(value=["metric","start"]),Index(value=["provisional","metric","app"])])
+@Entity(tableName="usage_intervals",indices=[Index("start"),Index("end"),Index(value=["metric","start"]),Index(value=["metric","end","start"]),Index(value=["provisional","metric","app"])])
 data class StoredSlice(@PrimaryKey val id:String,val metric:String,val app:String?,val start:Long,val end:Long,val evidence:String,val reason:String,val sources:String,val refs:String,val provisional:Boolean,val algorithm:Int=2){
     fun slice():UsageSlice{
         val tokens=refs.split(',').filter{it.isNotEmpty()}.toSet()
@@ -43,7 +43,8 @@ data class DiagnosticLog(@PrimaryKey val id:String,val time:Long,val code:String
     @Query("SELECT MIN(time) FROM usage_events WHERE source!='LEGACY_IMPORT'") suspend fun firstEvent():Long?
     @Query("SELECT MIN(time) FROM usage_events WHERE time>=:start AND source!='LEGACY_IMPORT' AND signal!='OTHER'") suspend fun firstRelevantEventFrom(start:Long):Long?
     @Insert(onConflict=OnConflictStrategy.REPLACE) suspend fun slices(values:List<StoredSlice>)
-    @Query("SELECT * FROM usage_intervals WHERE metric=:metric AND `end`>:start AND start<:end ORDER BY start") suspend fun slices(start:Long,end:Long,metric:String):List<StoredSlice>
+    @Query("SELECT * FROM usage_intervals INDEXED BY index_usage_intervals_metric_start WHERE metric=:metric AND `end`>:start AND start<:end ORDER BY start") suspend fun slices(start:Long,end:Long,metric:String):List<StoredSlice>
+    @Query("SELECT * FROM usage_intervals INDEXED BY index_usage_intervals_metric_end_start WHERE metric=:metric AND `end`>:start AND start<:end ORDER BY start") suspend fun recentSlices(start:Long,end:Long,metric:String):List<StoredSlice>
     @Query("DELETE FROM usage_intervals WHERE start>=:start AND algorithm=2") suspend fun deleteRecent(start:Long)
     @Query("SELECT * FROM sync_checkpoints WHERE time<=:time AND algorithm=2 ORDER BY time DESC LIMIT 1") suspend fun checkpoint(time:Long):SyncCheckpoint?
     @Query("SELECT * FROM sync_checkpoints WHERE algorithm=2 ORDER BY time DESC LIMIT 1") suspend fun latest():SyncCheckpoint?
