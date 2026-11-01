@@ -8,7 +8,7 @@ import sys
 root = Path(__file__).resolve().parents[1]
 allowed_roots = {"app", "core", "gradle", "tools", "docs"}
 allowed_files = {
-    ".gitignore", "README.md", "CHANGELOG.md", "build-local.ps1", "build.gradle.kts",
+    ".gitignore", "README.md", "CHANGELOG.md", "LICENSE", "build-local.ps1", "build.gradle.kts",
     "settings.gradle.kts", "gradle.properties", "gradlew", "gradlew.bat",
 }
 allowed_suffixes = {".kt", ".kts", ".xml", ".json", ".md", ".py", ".pro", ".properties"}

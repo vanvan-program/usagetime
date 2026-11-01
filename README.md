@@ -56,3 +56,11 @@ python3 tools/verify_dual_storage.py
 Git 源码树仅包含源码、数据库结构、合成测试和必要文档，不包含个人使用记录、个人手机信息、手机截图、导出备份、数据库实例、诊断日志、签名密钥或历史安装包。数据库结构 JSON 只描述表和字段，不包含数据库记录。测试使用人工构造的数据，示例模式使用程序生成的数据。Release 附件提供单独审查的安装包、源码压缩包及 SHA-256 校验文件。
 
 详见 [发布内容规则](docs/PUBLISHING.md)。
+
+## 开源协议
+
+本项目自行编写的源码采用 **GNU General Public License v3.0（GPL-3.0-only）**，完整条款见 [LICENSE](LICENSE)。
+
+Copyright (C) 2026 UsageTime contributors.
+
+第三方依赖和 Gradle Wrapper 保留各自的许可证及版权声明。
