@@ -44,7 +44,7 @@ interface UsageDao {
     suspend fun hasIntervals(start:Long,end:Long):Boolean
     @Query("SELECT * FROM coverage WHERE `end` > :start AND start < :end ORDER BY start")
     suspend fun coverage(start:Long,end:Long):List<SavedCoverage>
-    @Query("SELECT MIN(start) FROM (SELECT start FROM coverage UNION ALL SELECT start FROM intervals)") suspend fun first():Long?
+    @Query("SELECT MIN(value) FROM (SELECT MIN(start) AS value FROM coverage UNION ALL SELECT MIN(start) AS value FROM intervals)") suspend fun first():Long?
     @Query("SELECT * FROM cursor WHERE id=0") suspend fun cursor():Cursor?
     @Query("SELECT * FROM apps") suspend fun apps():List<SavedApp>
     @Insert(onConflict=OnConflictStrategy.IGNORE) suspend fun intervals(values:List<SavedInterval>)
@@ -95,6 +95,10 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
     private val mutex=Mutex()
     private data class ReportKey(val window:Window,val zone:String,val grain:Grain,val metric:UsageMetric?,val app:String?,val includeConfirmed:Boolean=true)
     private val reportCache=ReportCache<ReportKey>()
+    data class ReportCacheStats(val hits:Long,val misses:Long,val evictions:Long,val invalidations:Long,val entries:Int,val estimatedBytes:Long)
+    suspend fun reportCacheStats()=withContext(Dispatchers.IO){mutex.withLock{
+        ReportCacheStats(reportCache.hits,reportCache.misses,reportCache.evictions,reportCache.invalidations,reportCache.size,reportCache.weight)
+    }}
     private val revision=kotlinx.coroutines.flow.MutableStateFlow(0L)
     val reportRevision:kotlinx.coroutines.flow.StateFlow<Long> get()=revision
     // Called while holding mutex, before a writer can change or replace the database.
@@ -184,29 +188,33 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         }
     }
     private suspend fun maintainAndSnapshot(force:Boolean=false){
-        try{
+        HistoryMaintenanceCoordinator.run(
+            prepare={
             val elapsed=SystemClock.elapsedRealtime()
             val boot=Settings.Global.getInt(context.contentResolver,Settings.Global.BOOT_COUNT,-1)
             // Sync remains immediate. Only housekeeping scans use a six-hour cadence.
             if(force||ElapsedMaintenance.due(elapsed,boot,preferences.getLong("maintenance-elapsed",-1),preferences.getInt("maintenance-boot",-2))){
                 val now=System.currentTimeMillis();val zone=ZoneId.systemDefault()
-                database.withTransaction{archiveBeforeCleanup(now,zone)}
-                try{database.withTransaction{HistoryRetention.compact(database,now,zone)}}
-                catch(e:IllegalArgumentException){log(now,"CLEANUP_DEFERRED",e.message?:"保留明细")}
-                catch(e:IllegalStateException){log(now,"CLEANUP_DEFERRED",e.message?:"保留明细")}
+                HistoryMaintenanceCoordinator.State(elapsed,boot,now,zone)
+            }else null
+            },
+            archive={s->database.withTransaction{archiveBeforeCleanup(s.now,s.zone)}},
+            compact={s->database.withTransaction{HistoryRetention.compact(database,s.now,s.zone)}},
+            deferred={s,e->log(s.now,"CLEANUP_DEFERRED",e.message?:"保留明细")},
+            finishMaintenance={s->
                 database.withTransaction{
                     dual.trimCache(ZoneId.systemDefault().id)
                     dual.trimHourCache(ZoneId.systemDefault().id)
                     dual.trimMonthCache(ZoneId.systemDefault().id)
                     // Keep civil-midnight replay anchors, including a previously committed retention floor.
-                    database.openHelper.writableDatabase.execSQL("DELETE FROM sync_checkpoints WHERE algorithm=2 AND time<? AND time NOT IN (SELECT MAX(time) FROM sync_checkpoints WHERE algorithm=2 GROUP BY time/86400000) AND time NOT IN (SELECT MIN(time) FROM sync_checkpoints WHERE algorithm=2 GROUP BY time/86400000) AND time NOT IN (SELECT floor FROM retention_state)",arrayOf(now-100*86400000L))
+                    database.openHelper.writableDatabase.execSQL("DELETE FROM sync_checkpoints WHERE algorithm=2 AND time<? AND time NOT IN (SELECT MAX(time) FROM sync_checkpoints WHERE algorithm=2 GROUP BY time/86400000) AND time NOT IN (SELECT MIN(time) FROM sync_checkpoints WHERE algorithm=2 GROUP BY time/86400000) AND time NOT IN (SELECT floor FROM retention_state)",arrayOf(s.now-100*86400000L))
                     dual.trimDiagnostics(listOf("STATE_RESET","RETENTION_GAP","BOOT_CHANGED","WALL_CLOCK_BACKWARD","WALL_CLOCK_DISCONTINUITY","PERMISSION_INTERRUPTION","PERMISSION_DENIED","SYNC_DELAY","EMPTY_SYSTEM_QUERY","HISTORY_REBUILT","BACKUP_IMPORTED","SYNC_COMMITTED","RECOVERY_SNAPSHOT"))
                 }
-                preferences.edit().putLong("maintenance-elapsed",elapsed).putInt("maintenance-boot",boot).apply()
-            }
-            snapshotInsideLock(force)
-        }catch(e:kotlinx.coroutines.CancellationException){throw e}
-        catch(e:Exception){preferences.edit().putString("safety-warning","安全副本尚未更新：${e.message}").apply()}
+            },
+            recordMaintenance={s->preferences.edit().putLong("maintenance-elapsed",s.elapsed).putInt("maintenance-boot",s.boot).apply()},
+            snapshot={snapshotInsideLock(force);Unit},
+            warning={e->preferences.edit().putString("safety-warning","安全副本尚未更新：${e.message}").apply()}
+        )
     }
     suspend fun createSafetyCopy():String=withContext(Dispatchers.IO){mutex.withLock{snapshotInsideLock(true);"已创建并校验本机安全副本"}}
     private fun validateCandidate(file:File){
@@ -293,79 +301,146 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
     private fun monthRows(cells:List<MetricDayCell>,metric:UsageMetric,zone:ZoneId,recordedDays:Long)=cells.map{c->MonthUsage(DualCodec.hash("month|${c.start}|${zone.id}|$metric|${c.app}|${c.evidence}"),c.start,c.end,zone.id,metric.name,c.app,c.evidence.name,c.millis,c.provisional,recordedDays,3)}
     /** Per-report cache capacity; counts and floor stay in memory until a trim forces a refresh. */
     private class CacheBudget(val cap:Int){
+        var loaded=false
         var rows:Long=0L;var floor:Long?=null
         fun allow(slotStart:Long)=rows<cap||floor?.let{slotStart>=it}==true
-        fun record(inserted:Int,slotStart:Long){rows+=inserted;if(floor==null||slotStart<floor!!)floor=slotStart}
+        fun record(inserted:Int,slotStart:Long){loaded=true;rows+=inserted;if(floor==null||slotStart<floor!!)floor=slotStart}
+    }
+    private suspend fun prepareBudget(budget:CacheBudget,zone:ZoneId,grain:Grain){
+        if(budget.loaded)return
+        budget.rows=when(grain){Grain.HOUR->dual.hourCount();Grain.MONTH->dual.monthCount();else->dual.dailyCount()}
+        budget.floor=when(grain){Grain.HOUR->dual.hourFirst(zone.id);Grain.MONTH->dual.monthFirst(zone.id);else->dual.cacheFirst(zone.id)}
+        budget.loaded=true
     }
     private fun storageWritable()=StatFs(context.filesDir.absolutePath).availableBytes>=LocalRecovery.RESERVE
     /** Day cells from the day cache; missing days are computed from slices and written back. */
-    private suspend fun dailyCells(slot:Window,metric:UsageMetric,zone:ZoneId,budget:CacheBudget):List<MetricDayCell>{
-        val stored=dual.daily(slot.start,slot.end,zone.id,metric.name)
+    private suspend fun dailyCells(slot:Window,metric:UsageMetric,zone:ZoneId,budget:CacheBudget,stored:List<DayMeasure>,archived:Pair<List<HistoryDay>,HistorySeal?>,floor:Long):List<MetricDayCell>{
         if(stored.any{it.app==DailyMetrics.SUMMARY})return stored.map{MetricDayCell(it.dayStart,it.dayEnd,it.app,Evidence.valueOf(it.evidence),it.millis,it.provisionalMillis)}
         // Durable rows outlive both cache trimming and the 90-day detail window.
-        val seal=dualHistory.seal(zone.id,slot.start,metric.name)
+        val seal=archived.second
         if(seal!=null&&seal.dayEnd==slot.end){
-            val rows=dualHistory.rows(zone.id,slot.start,metric.name)
+            val rows=archived.first.sortedWith(compareBy({it.appKey},{it.evidence}))
             HistoryRetention.validate(rows,seal)
             return rows.map{
                 val grade=if(seal.origin=="IMPORTED"&&it.app!=DailyMetrics.OBSERVED&&it.evidence==Evidence.CONFIRMED.name)Evidence.INFERRED else Evidence.valueOf(it.evidence)
                 MetricDayCell(it.dayStart,it.dayEnd,it.app,grade,if(seal.origin=="IMPORTED"&&it.app==DailyMetrics.OBSERVED)0 else it.millis,it.provisionalMillis)
             }
         }
-        require(slot.start>=(dualHistory.state()?.floor?:0)){"此历史范围仅保留原记录时区的完整每日汇总，无法还原部分日期"}
+        require(slot.start>=floor){"此历史范围仅保留原记录时区的完整每日汇总，无法还原部分日期"}
         val calculated=calculateDay(slot,metric)
-        if(storageWritable()&&budget.allow(slot.start)){
-            dual.daily(dayRows(calculated,metric,zone))
-            budget.record(calculated.size,slot.start)
-            if(budget.rows>500000){dual.trimCache(zone.id);budget.rows=dual.dailyCount();budget.floor=dual.cacheFirst(zone.id)}
+        if(storageWritable()){
+            prepareBudget(budget,zone,Grain.DAY)
+            if(budget.allow(slot.start)){
+                dual.daily(dayRows(calculated,metric,zone))
+                budget.record(calculated.size,slot.start)
+                if(budget.rows>500000){dual.trimCache(zone.id);budget.rows=dual.dailyCount();budget.floor=dual.cacheFirst(zone.id)}
+            }
         }
         return calculated
     }
+    /** Bounded prefetch keeps Room round trips proportional to pages, not the history's day count. */
+    private inner class DayReader(val metric:UsageMetric,val zone:ZoneId,val budget:CacheBudget,val end:Long,val floor:Long){
+        private var page=Window(0,0)
+        private var days=emptyMap<Long,List<DayMeasure>>()
+        private var history=emptyMap<Long,List<HistoryDay>>()
+        private var seals=emptyMap<Long,HistorySeal>()
+        suspend fun read(slot:Window):List<MetricDayCell>{
+            if(slot.start<page.start||slot.start>=page.end){
+                currentCoroutineContext().ensureActive()
+                page=Window(slot.start,minOf(end,Dates.midnight(Dates.date(slot.start,zone).plusDays(32),zone)))
+                days=dual.dailyRange(page.start,page.end,zone.id,metric.name).groupBy{it.dayStart}
+                // Avoid reopening the durable archive when every day in this page already has its cached summary.
+                val missing=Reports.slots(page,zone,Grain.DAY).filter{day->
+                    days[day.start].orEmpty().none{row->row.app==DailyMetrics.SUMMARY&&row.dayEnd==day.end}
+                }
+                if(missing.isEmpty()){
+                    seals=emptyMap();history=emptyMap()
+                }else{
+                    val from=missing.first().start;val until=missing.last().end
+                    seals=dualHistory.sealsRange(zone.id,from,until,metric.name).associateBy{it.dayStart}
+                    history=if(seals.isEmpty())emptyMap()else dualHistory.rowsRange(zone.id,from,until,metric.name)
+                        .filter{seals[it.dayStart]?.dayEnd==it.dayEnd}.groupBy{it.dayStart}
+                }
+            }
+            return dailyCells(slot,metric,zone,budget,days[slot.start].orEmpty().filter{it.dayEnd==slot.end},
+                history[slot.start].orEmpty() to seals[slot.start],floor)
+        }
+    }
     /** Hour cells from the hour cache; the current partial hour never matches exact bounds and is recomputed live. */
-    private suspend fun hourlyCells(slot:Window,metric:UsageMetric,zone:ZoneId,budget:CacheBudget):List<MetricDayCell>{
-        val stored=dual.hourly(slot.start,slot.end,zone.id,metric.name)
+    private suspend fun hourlyCells(slot:Window,metric:UsageMetric,zone:ZoneId,budget:CacheBudget,stored:List<HourMeasure>):List<MetricDayCell>{
         if(stored.any{it.app==DailyMetrics.SUMMARY})return stored.map{MetricDayCell(it.hourStart,it.hourEnd,it.app,Evidence.valueOf(it.evidence),it.millis,it.provisionalMillis)}
         require(slot.start>=(dualHistory.state()?.floor?:0)){"90天以前请查看每日或每月汇总"}
         val data=readInsideTransaction(slot,metric)
         val calculated=DailyMetrics.cells(data.slices,metric,slot)
-        if(storageWritable()&&budget.allow(slot.start)){
-            dual.hourly(hourRows(calculated,metric,zone))
-            budget.record(calculated.size,slot.start)
-            if(budget.rows>200000){dual.trimHourCache(zone.id);budget.rows=dual.hourCount();budget.floor=dual.hourFirst(zone.id)}
+        if(storageWritable()){
+            prepareBudget(budget,zone,Grain.HOUR)
+            if(budget.allow(slot.start)){
+                dual.hourly(hourRows(calculated,metric,zone))
+                budget.record(calculated.size,slot.start)
+                if(budget.rows>200000){dual.trimHourCache(zone.id);budget.rows=dual.hourCount();budget.floor=dual.hourFirst(zone.id)}
+            }
         }
         return calculated
     }
     /** Month cells merged from day cells; per-month recorded days survive day-cache trimming. */
-    private suspend fun monthlyCells(slot:Window,metric:UsageMetric,zone:ZoneId,dayBudget:CacheBudget,monthBudget:CacheBudget):Pair<List<MetricDayCell>,Long>{
-        val stored=dual.monthly(slot.start,slot.end,zone.id,metric.name)
+    private suspend fun monthlyCells(slot:Window,metric:UsageMetric,zone:ZoneId,reader:DayReader,monthBudget:CacheBudget,stored:List<MonthMeasure>):Pair<List<MetricDayCell>,Long>{
         if(stored.any{it.app==DailyMetrics.SUMMARY})return stored.map{MetricDayCell(it.monthStart,it.monthEnd,it.app,Evidence.valueOf(it.evidence),it.millis,it.provisionalMillis)} to stored.first().recordedDays
-        val dayGroups=Reports.slots(slot,zone,Grain.DAY).map{day->day to dailyCells(day,metric,zone,dayBudget)}
+        val dayGroups=Reports.slots(slot,zone,Grain.DAY).map{day->day to reader.read(day)}
         val cells=DailyMetrics.mergeCells(dayGroups.map{it.second},slot)
         val days=dayGroups.sumOf{(w,c)->DailyMetrics.recordedDays(w,c,zone).toLong()}
-        if(storageWritable()&&monthBudget.allow(slot.start)){
-            dual.monthly(monthRows(cells,metric,zone,days))
-            monthBudget.record(cells.size,slot.start)
-            if(monthBudget.rows>500000){dual.trimMonthCache(zone.id);monthBudget.rows=dual.monthCount();monthBudget.floor=dual.monthFirst(zone.id)}
+        if(storageWritable()){
+            prepareBudget(monthBudget,zone,Grain.MONTH)
+            if(monthBudget.allow(slot.start)){
+                dual.monthly(monthRows(cells,metric,zone,days))
+                monthBudget.record(cells.size,slot.start)
+                if(monthBudget.rows>500000){dual.trimMonthCache(zone.id);monthBudget.rows=dual.monthCount();monthBudget.floor=dual.monthFirst(zone.id)}
+            }
         }
         return cells to days
     }
     suspend fun aggregate(window:Window,zone:ZoneId,grain:Grain,metric:UsageMetric,app:String?,includeConfirmed:Boolean=true):UsageReport=cachedReport(ReportKey(window,zone.id,grain,metric,app,includeConfirmed)){database.withTransaction{
         if(grain==Grain.HOUR){
-            val budget=CacheBudget(200000).apply{rows=dual.hourCount();floor=dual.hourFirst(zone.id)}
-            val slotCells=Reports.slots(window,zone,Grain.HOUR).map{slot->slot to hourlyCells(slot,metric,zone,budget)}
+            val budget=CacheBudget(200000)
+            val slotCells=Reports.slots(window,zone,Grain.HOUR).chunked(32).flatMap{page->
+                currentCoroutineContext().ensureActive()
+                val stored=dual.hourlyRange(page.first().start,page.last().end,zone.id,metric.name).groupBy{it.hourStart}
+                page.map{slot->slot to hourlyCells(slot,metric,zone,budget,stored[slot.start].orEmpty().filter{it.hourEnd==slot.end})}
+            }
             return@withTransaction DailyMetrics.hourReport(slotCells,window,zone,app,includeConfirmed)
         }
         if(grain==Grain.MONTH){
-            val dayBudget=CacheBudget(500000).apply{rows=dual.dailyCount();floor=dual.cacheFirst(zone.id)}
-            val monthBudget=CacheBudget(500000).apply{rows=dual.monthCount();floor=dual.monthFirst(zone.id)}
-            val monthCells=Reports.slots(window,zone,Grain.MONTH).map{slot->slot to monthlyCells(slot,metric,zone,dayBudget,monthBudget)}
+            val dayBudget=CacheBudget(500000)
+            val monthBudget=CacheBudget(500000)
+            val reader=DayReader(metric,zone,dayBudget,window.end,dualHistory.state()?.floor?:0)
+            val monthCells=Reports.slots(window,zone,Grain.MONTH).chunked(12).flatMap{page->
+                currentCoroutineContext().ensureActive()
+                val stored=dual.monthlyRange(page.first().start,page.last().end,zone.id,metric.name).groupBy{it.monthStart}
+                page.map{slot->slot to monthlyCells(slot,metric,zone,reader,monthBudget,stored[slot.start].orEmpty().filter{it.monthEnd==slot.end})}
+            }
             return@withTransaction DailyMetrics.monthReport(monthCells.map{(slot,cells)->slot to cells.first},window,zone,app,monthCells.sumOf{it.second.second},includeConfirmed)
         }
-        val budget=CacheBudget(500000).apply{rows=dual.dailyCount();floor=dual.cacheFirst(zone.id)}
+        val budget=CacheBudget(500000)
+        val reader=DayReader(metric,zone,budget,window.end,dualHistory.state()?.floor?:0)
         val accumulator=DailyMetrics.Accumulator(window,zone,grain,app,includeConfirmed=includeConfirmed)
-        for(slot in Reports.slots(window,zone,Grain.DAY)){
+        for(page in Reports.slots(window,zone,Grain.DAY).chunked(128)){
             currentCoroutineContext().ensureActive()
-            accumulator.addDay(dailyCells(slot,metric,zone,budget))
+            val from=page.first().start;val until=page.last().end
+            val compact=dual.dailyTotals(from,until,zone.id,metric.name,app,includeConfirmed)
+            // Exact day bounds and one summary are mandatory; archive reads retain digest validation.
+            if(compact.size==page.size&&compact.indices.all{i->
+                compact[i].dayStart==page[i].start&&compact[i].dayEnd==page[i].end&&compact[i].summaries==1&&compact[i].invalidEvidence==0
+            }){
+                compact.forEach{day->accumulator.addDayTotals(Window(day.dayStart,day.dayEnd),
+                    day.value,day.unknown,day.provisional,day.observed,day.positive!=0)}
+                dual.dailyAppTotals(from,until,zone.id,metric.name).forEach{row->
+                    accumulator.addAppTotals(row.app,row.confirmed,row.inferred,row.provisional)
+                }
+            }else{
+                for(slot in page){
+                    currentCoroutineContext().ensureActive()
+                    accumulator.addDay(reader.read(slot))
+                }
+            }
         }
         accumulator.finish()
     }}
@@ -482,30 +557,18 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         // Phase A: raw evidence, continuity markers and the durable replay intent commit first.
         database.withTransaction {
             val queryStarted=SystemClock.elapsedRealtime()
-            var from=queryStart
             // Query the platform in bounded windows; never retain a week-sized parcel/list.
-            while(from<now){
-                currentCoroutineContext().ensureActive();ensureWriteSpace()
-                val until=minOf(now,from+6*3_600_000L)
-                val batch=ArrayList<StoredEvent>(1000)
-                suspend fun flush(){
-                    if(batch.isEmpty())return
-                    val inserted=dual.events(batch)
-                    inserted.forEachIndexed{index,id->
-                        val row=batch[index]
-                        if(id!=-1L&&row.signal!=Signal.OTHER.name)earliestNew=minOf(earliestNew?:row.time,row.time)
-                    }
-                    batch.clear();currentCoroutineContext().ensureActive();ensureWriteSpace()
-                }
-                for(row in platformEvents(from,until,zone.id)){
-                    batch+=row
+            RawEventBatchCollector.collect(
+                start=queryStart,end=now,
+                read={from,until->platformEvents(from,until,zone.id)},
+                write={batch->dual.events(batch)},
+                onRow={row->
                     if(row.app.isNotBlank())observedApps+=row.app
                     rawCount++;if(row.signal!=Signal.OTHER.name)hasLifecycle=true
-                    if(batch.size>=1000)flush()
-                }
-                flush()
-                from=until
-            }
+                },
+                onInserted={row->if(row.signal!=Signal.OTHER.name)earliestNew=minOf(earliestNew?:row.time,row.time)},
+                check={currentCoroutineContext().ensureActive();ensureWriteSpace()}
+            )
             queryMs=SystemClock.elapsedRealtime()-queryStarted
             if(interrupted||clock!=null||latest!=null&&queryStart>latest.time){
                 val boundary=latest?.time?:savedQuery?.end?:queryStart
@@ -613,7 +676,8 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         for(monthSlot in Reports.slots(Window(monthStart,now),zone,Grain.MONTH)){
             for(metric in UsageMetric.entries){
                 currentCoroutineContext().ensureActive()
-                monthlyCells(monthSlot,metric,zone,dayBudget,monthBudget)
+                val reader=DayReader(metric,zone,dayBudget,now,dualHistory.state()?.floor?:0)
+                monthlyCells(monthSlot,metric,zone,reader,monthBudget,dual.monthly(monthSlot.start,monthSlot.end,zone.id,metric.name).map{MonthMeasure(it)})
             }
         }
         timings.summaryMs=SystemClock.elapsedRealtime()-summariesStarted
@@ -707,114 +771,62 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
     suspend fun exportJson():String {val out=java.io.ByteArrayOutputStream();writeBackup(out);return out.toString("UTF-8")}
     /** Streaming SQLite snapshot. Database/OS credentials and the active checkpoint are not restored. */
     suspend fun writeBackup(output:java.io.OutputStream)=withContext(Dispatchers.IO){mutex.withLock{database.withTransaction{
-        val writer=android.util.JsonWriter(java.io.OutputStreamWriter(output,Charsets.UTF_8))
-        writer.beginObject().name("format").value("usagetime-backup").name("version").value(3L).name("exportedAt").value(System.currentTimeMillis())
-        val tables=listOf("intervals","coverage","apps","usage_events","usage_intervals","history_days","history_seals","retention_state","sync_checkpoints","diagnostic_logs")
-        for(table in tables){
-            writer.name(table).beginArray()
-            var exported=0L
-            database.openHelper.readableDatabase.query("SELECT * FROM $table").use{cursor->while(cursor.moveToNext()){
-                if(++exported%1000==0L)currentCoroutineContext().ensureActive()
-                writer.beginObject();for(i in 0 until cursor.columnCount){val name=cursor.getColumnName(i);writer.name(name)
-                    when(cursor.getType(i)){
-                        android.database.Cursor.FIELD_TYPE_NULL->writer.nullValue()
-                        android.database.Cursor.FIELD_TYPE_INTEGER->if(name in setOf("reliable","provisional","blocked","known"))writer.value(cursor.getLong(i)!=0L)else writer.value(cursor.getLong(i))
-                        else->writer.value(cursor.getString(i))
-                    }
-                };writer.endObject()
-            }}
-            writer.endArray()
-        }
-        writer.endObject();writer.flush()
+        BackupStreamWriter.write(output){database.openHelper.readableDatabase.query(it)}
     }}}
     suspend fun importBackup(input:java.io.InputStream):Long=withContext(Dispatchers.IO){mutex.withLock{
         ensureWriteSpace();invalidateReports();snapshotInsideLock(true)
         val importedTotal=database.withTransaction{
-        val buffered=java.io.BufferedInputStream(input,65536);buffered.mark(2)
-        val first=buffered.read();val second=buffered.read();buffered.reset()
-        val decoded=if(first==0x1f&&second==0x8b)java.util.zip.GZIPInputStream(buffered,65536)else buffered
-        val reader=android.util.JsonReader(java.io.InputStreamReader(decoded,Charsets.UTF_8));reader.isLenient=false
-        var format="";var version=0;var imported=0L;var recordCount=0L;var importedDetailStart:Long?=null
+        var imported=0L;var importedDetailStart:Long?=null
         val raw=database.openHelper.writableDatabase
         raw.execSQL("CREATE TEMP TABLE IF NOT EXISTS incoming_days AS SELECT * FROM history_days WHERE 0")
         raw.execSQL("CREATE TEMP TABLE IF NOT EXISTS incoming_seals AS SELECT * FROM history_seals WHERE 0")
         raw.execSQL("DELETE FROM incoming_days");raw.execSQL("DELETE FROM incoming_seals")
         raw.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS temp.incoming_day_key ON incoming_days(zone,dayStart,metric,appKey,evidence)")
         raw.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS temp.incoming_seal_key ON incoming_seals(zone,dayStart,metric)")
-        val eventBatch=ArrayList<StoredEvent>();val sliceBatch=ArrayList<StoredSlice>();val legacyBatch=ArrayList<SavedInterval>();var batchBytes=0L
-        suspend fun flushBatches(){
-            if(eventBatch.isNotEmpty()){dual.events(eventBatch);eventBatch.clear()}
-            if(sliceBatch.isNotEmpty()){dual.slices(sliceBatch);sliceBatch.clear()}
-            if(legacyBatch.isNotEmpty()){dao.intervals(legacyBatch);legacyBatch.clear()}
-            batchBytes=0
-        }
+        val batches=BackupImportBatchScheduler<StoredEvent,StoredSlice,SavedInterval>(
+            writeEvents={dual.events(it)},
+            writeSlices=dual::slices,
+            writeIntervals=dao::intervals,
+            ensureWriteSpace=::ensureWriteSpace)
         val latestAllowed=System.currentTimeMillis()+86_400_000L
-        fun valid(start:Long,end:Long){require(start>=0&&end>start&&end<=latestAllowed){"备份区间无效"}}
-        fun objectRow(table:String):JSONObject{
-            val obj=JSONObject();reader.beginObject();var fields=0
-            while(reader.hasNext()){
-                require(++fields<32){"备份字段过多"};val name=reader.nextName();require(name.length<=80)
-                when(reader.peek()){
-                    android.util.JsonToken.NULL->{reader.nextNull();obj.put(name,JSONObject.NULL)}
-                    android.util.JsonToken.BOOLEAN->obj.put(name,reader.nextBoolean())
-                    android.util.JsonToken.NUMBER->obj.put(name,reader.nextLong())
-                    android.util.JsonToken.STRING->{val value=reader.nextString();obj.put(name,DualCodec.backupString(table,name,value))}
-                    else->error("备份包含不支持的字段")
-                }
-            };reader.endObject();return obj
-        }
-        reader.beginObject()
-        while(reader.hasNext())when(val key=reader.nextName()){
-            "format"->format=reader.nextString()
-            "version"->version=reader.nextInt()
-            "exportedAt"->{reader.skipValue()}
-            "intervals","coverage","apps","usage_events","usage_intervals","history_days","history_seals","retention_state","sync_checkpoints","diagnostic_logs"->{
-                reader.beginArray();while(reader.hasNext()){
-                    recordCount++
-                    if(recordCount%1000==0L){currentCoroutineContext().ensureActive();ensureWriteSpace()}
-                    val row=objectRow(key)
-                    when(key){
-                        "intervals"->{val pkg=row.getString("app");require(pkg.isNotBlank()&&pkg.length<=255);val a=row.getLong("start");val b=row.getLong("end");valid(a,b);legacyBatch+=SavedInterval(pkg,a,b);batchBytes+=pkg.length*2L+64;imported++}
-                        "coverage"->{val a=row.getLong("start");val b=row.getLong("end");valid(a,b);val known=row.getBoolean("reliable");dao.coverage(listOf(SavedCoverage(a,b,known)));if(known)dao.upgradeCoverage(a,b)}
-                        "apps"->{val pkg=row.getString("app");require(pkg.isNotBlank()&&pkg.length<=255);dao.apps(listOf(SavedApp(pkg,row.getString("label").take(120))))}
-                        "usage_events"->{
-                            val time=row.getLong("time");require(time>=0&&time<=latestAllowed);val signal=Signal.valueOf(row.getString("signal"))
-                            // Retain raw imported evidence for audit, never splice it into this device's active state.
-                            eventBatch+=StoredEvent("archive:"+row.getString("id").removePrefix("archive:"),time,signal.name,row.getString("app"),row.getString("activity"),if(row.isNull("instance"))null else row.getString("instance"),EvidenceSource.LEGACY_IMPORT.name,row.getString("zone"),DualCodec.importOrigin(row.getString("source"),row.optString("origin","LOCAL")),if(row.isNull("rawType"))null else row.getInt("rawType"));batchBytes+=row.toString().length*2L
-                        }
-                        "usage_intervals"->{
-                            val a=row.getLong("start");val b=row.getLong("end");valid(a,b);val metric=UsageMetric.valueOf(row.getString("metric"));val original=Evidence.valueOf(row.getString("evidence"))
-                            importedDetailStart=minOf(importedDetailStart?:a,a)
-                            val pkg=if(row.isNull("app"))null else row.getString("app");require(pkg==null||pkg.length<=255)
-                            val grade=if(original==Evidence.CONFIRMED||original==Evidence.INFERRED)Evidence.INFERRED else original
-                            val id="archive:"+row.getString("id").removePrefix("archive:")
-                            sliceBatch+=StoredSlice(id,metric.name,pkg,a,b,grade.name,DualCodec.importReason(row.getString("reason"),original.name,row.getString("sources")),EvidenceSource.LEGACY_IMPORT.name,row.optString("refs","").split(',').filter{it.isNotBlank()}.joinToString(","){"archive:"+it.removePrefix("archive:")},row.optBoolean("provisional",false),0);batchBytes+=row.toString().length*2L;imported++
-                        }
-                        "history_days"->{
-                            val a=row.getLong("dayStart");val b=row.getLong("dayEnd");valid(a,b)
-                            val app=if(row.isNull("app"))null else row.getString("app");require(app==null||app.length<=255)
-                            require(row.getString("appKey")==HistoryRetention.appKey(app))
-                            raw.execSQL("INSERT INTO incoming_days VALUES(?,?,?,?,?,?,?,?,?,?)",arrayOf<Any?>(
-                                row.getString("zone"),a,row.getString("metric"),row.getString("appKey"),row.getString("evidence"),b,
-                                app,row.getLong("millis"),row.getLong("provisionalMillis"),row.getInt("algorithm")))
-                            imported++
-                        }
-                        "history_seals"->{
-                            raw.execSQL("INSERT INTO incoming_seals VALUES(?,?,?,?,?,?,?)",arrayOf(
-                                row.getString("zone"),row.getLong("dayStart"),row.getString("metric"),row.getLong("dayEnd"),
-                                row.getLong("rows"),row.getString("digest"),"IMPORTED"))
-                        }
-                        "retention_state"->Unit // Imported metadata never authorizes local deletion.
-                        "diagnostic_logs"->Unit // Incoming diagnostics remain in the backup; do not impersonate local audit entries.
-                        "sync_checkpoints"->Unit // Checkpoints are device-local and must never be activated from a backup.
+        val decoder=BackupRecordDecoder(latestAllowed)
+        BackupStreamReader.read(input,object:BackupStreamReader.Sink{
+            override suspend fun checkpoint(){ensureWriteSpace()}
+            override suspend fun endArray(table:String){batches.flushBatches()}
+            override suspend fun row(table:String,row:JSONObject){
+                when(table){
+                    "intervals"->{val value=decoder.interval(row);batches.addInterval(value,value.app.length*2L+64);imported++}
+                    "coverage"->{val value=decoder.coverage(row);dao.coverage(listOf(value));if(value.reliable)dao.upgradeCoverage(value.start,value.end)}
+                    "apps"->{dao.apps(listOf(decoder.app(row)))}
+                    "usage_events"->{
+                        batches.addEvent(decoder.event(row),row.toString().length*2L)
                     }
-                    if(eventBatch.size+sliceBatch.size+legacyBatch.size>=1000||batchBytes>=1048576){flushBatches();ensureWriteSpace()}
-                };flushBatches();reader.endArray()
+                    "usage_intervals"->{
+                        val value=decoder.slice(row)
+                        importedDetailStart=minOf(importedDetailStart?:value.start,value.start)
+                        batches.addSlice(value,row.toString().length*2L);imported++
+                    }
+                    "history_days"->{
+                        val a=row.getLong("dayStart");val b=row.getLong("dayEnd");decoder.validateRange(a,b)
+                        val app=if(row.isNull("app"))null else row.getString("app");require(app==null||app.length<=255)
+                        require(row.getString("appKey")==HistoryRetention.appKey(app))
+                        raw.execSQL("INSERT INTO incoming_days VALUES(?,?,?,?,?,?,?,?,?,?)",arrayOf<Any?>(
+                            row.getString("zone"),a,row.getString("metric"),row.getString("appKey"),row.getString("evidence"),b,
+                            app,row.getLong("millis"),row.getLong("provisionalMillis"),row.getInt("algorithm")))
+                        imported++
+                    }
+                    "history_seals"->{
+                        raw.execSQL("INSERT INTO incoming_seals VALUES(?,?,?,?,?,?,?)",arrayOf(
+                            row.getString("zone"),row.getLong("dayStart"),row.getString("metric"),row.getLong("dayEnd"),
+                            row.getLong("rows"),row.getString("digest"),"IMPORTED"))
+                    }
+                    "retention_state"->Unit // Imported metadata never authorizes local deletion.
+                    "diagnostic_logs"->Unit // Incoming diagnostics remain in the backup; do not impersonate local audit entries.
+                    "sync_checkpoints"->Unit // Checkpoints are device-local and must never be activated from a backup.
+                }
+                batches.finishRow()
             }
-            else->reader.skipValue()
-        }
-        reader.endObject();require(format=="usagetime-backup"&&version in 1..3){"不是受支持的用时记备份"}
-        require(reader.peek()==android.util.JsonToken.END_DOCUMENT){"备份存在额外内容"}
+        })
         importedDetailStart?.let{
             // Keep immutable compacted days; reject an ambiguous merge rather than replace a total with a fragment.
             require(it>=(dualHistory.state()?.floor?:0)){"备份明细涉及已压缩历史，请在独立安装中恢复"}

@@ -30,7 +30,49 @@ data class MonthUsage(@PrimaryKey val id:String,val monthStart:Long,val monthEnd
 data class SyncCheckpoint(@PrimaryKey val time:Long,val state:String,val wall:Long,val elapsed:Long,val boot:String,val zone:String,val algorithm:Int=2)
 @Entity(tableName="diagnostic_logs",indices=[Index("time")])
 data class DiagnosticLog(@PrimaryKey val id:String,val time:Long,val code:String,val detail:String)
+data class DayMeasure(val dayStart:Long,val dayEnd:Long,val app:String?,val evidence:String,val millis:Long,val provisionalMillis:Long)
+data class DayAggregate(val dayStart:Long,val dayEnd:Long,val value:Long,val unknown:Long,val provisional:Long,val observed:Long,val positive:Int,val summaries:Int,val invalidEvidence:Int)
+data class AppAggregate(val app:String,val confirmed:Long,val inferred:Long,val provisional:Long)
+data class HourMeasure(val hourStart:Long,val hourEnd:Long,val app:String?,val evidence:String,val millis:Long,val provisionalMillis:Long)
+data class MonthMeasure(val monthStart:Long,val monthEnd:Long,val app:String?,val evidence:String,val millis:Long,val provisionalMillis:Long,val recordedDays:Long){
+    constructor(row:MonthUsage):this(row.monthStart,row.monthEnd,row.app,row.evidence,row.millis,row.provisionalMillis,row.recordedDays)
+}
 @Dao interface DualDao {
+    @Query("""
+        SELECT dayStart,dayEnd,
+          SUM(CASE WHEN app IS NOT NULL AND app NOT IN ('__QUALITY_SUMMARY__','__CONFIRMED_COVERAGE__')
+            AND evidence IN ('CONFIRMED','INFERRED') AND (:selected IS NULL OR app=:selected)
+            AND (:includeConfirmed OR evidence!='CONFIRMED') THEN millis ELSE 0 END) AS value,
+          SUM(CASE WHEN app='__QUALITY_SUMMARY__' THEN millis ELSE 0 END) AS unknown,
+          SUM(CASE WHEN app='__QUALITY_SUMMARY__' THEN provisionalMillis ELSE 0 END) AS provisional,
+          SUM(CASE WHEN app='__CONFIRMED_COVERAGE__' THEN millis ELSE 0 END) AS observed,
+          MAX(CASE WHEN app IS NOT NULL AND app NOT IN ('__QUALITY_SUMMARY__','__CONFIRMED_COVERAGE__')
+            AND evidence IN ('CONFIRMED','INFERRED') AND millis>0 THEN 1 ELSE 0 END) AS positive,
+          SUM(CASE WHEN app='__QUALITY_SUMMARY__' THEN 1 ELSE 0 END) AS summaries,
+          SUM(CASE WHEN evidence NOT IN ('CONFIRMED','INFERRED','UNKNOWN','LEGACY') THEN 1 ELSE 0 END) AS invalidEvidence
+        FROM daily_usage WHERE zone=:zone AND metric=:metric AND algorithm=3
+          AND dayStart>=:start AND dayStart<:end GROUP BY dayStart,dayEnd ORDER BY dayStart,dayEnd
+    """)
+    suspend fun dailyTotals(start:Long,end:Long,zone:String,metric:String,selected:String?,includeConfirmed:Boolean):List<DayAggregate>
+    @Query("""
+        SELECT d.app,
+          SUM(CASE WHEN d.evidence='CONFIRMED' THEN d.millis ELSE 0 END) AS confirmed,
+          SUM(CASE WHEN d.evidence='INFERRED' THEN d.millis ELSE 0 END) AS inferred,
+          SUM(d.provisionalMillis) AS provisional
+        FROM daily_usage d WHERE d.zone=:zone AND d.metric=:metric AND d.algorithm=3
+          AND d.dayStart>=:start AND d.dayStart<:end AND d.app IS NOT NULL
+          AND d.app NOT IN ('__QUALITY_SUMMARY__','__CONFIRMED_COVERAGE__')
+        GROUP BY d.app ORDER BY MIN(d.dayStart),
+          (SELECT rowid FROM daily_usage f WHERE f.zone=:zone AND f.metric=:metric AND f.algorithm=3
+            AND f.dayStart>=:start AND f.dayStart<:end AND f.app=d.app ORDER BY f.dayStart,f.rowid LIMIT 1)
+    """)
+    suspend fun dailyAppTotals(start:Long,end:Long,zone:String,metric:String):List<AppAggregate>
+    @Query("SELECT dayStart,dayEnd,app,evidence,millis,provisionalMillis FROM daily_usage WHERE zone=:zone AND metric=:metric AND algorithm=3 AND dayStart>=:start AND dayStart<:end ORDER BY dayStart")
+    suspend fun dailyRange(start:Long,end:Long,zone:String,metric:String):List<DayMeasure>
+    @Query("SELECT monthStart,monthEnd,app,evidence,millis,provisionalMillis,recordedDays FROM month_usage WHERE zone=:zone AND metric=:metric AND algorithm=3 AND monthStart>=:start AND monthStart<:end ORDER BY monthStart")
+    suspend fun monthlyRange(start:Long,end:Long,zone:String,metric:String):List<MonthMeasure>
+    @Query("SELECT hourStart,hourEnd,app,evidence,millis,provisionalMillis FROM hour_usage WHERE zone=:zone AND metric=:metric AND algorithm=3 AND hourStart>=:start AND hourStart<:end ORDER BY hourStart")
+    suspend fun hourlyRange(start:Long,end:Long,zone:String,metric:String):List<HourMeasure>
     @Query("SELECT MIN(dayStart) FROM daily_usage WHERE zone=:zone") suspend fun cacheFirst(zone:String):Long?
     @Query("SELECT COUNT(*) FROM daily_usage") suspend fun dailyCount():Long
     @Query("DELETE FROM daily_usage WHERE algorithm!=3 OR zone!=:zone OR dayStart<(SELECT MIN(dayStart) FROM (SELECT dayStart FROM daily_usage WHERE zone=:zone ORDER BY dayStart DESC LIMIT :maxRows))") suspend fun trimCache(zone:String,maxRows:Int=500000)

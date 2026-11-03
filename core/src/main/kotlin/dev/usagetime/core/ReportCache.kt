@@ -5,8 +5,16 @@ class ReportCache<K>(private val maxEntries: Int = 12, private val maxWeight: Lo
     init { require(maxEntries > 0 && maxWeight > 0) }
     private val entries = LinkedHashMap<K, Pair<UsageReport, Long>>(16, 0.75f, true)
     var weight: Long = 0; private set
+    var hits: Long = 0; private set
+    var misses: Long = 0; private set
+    var evictions: Long = 0; private set
+    var invalidations: Long = 0; private set
     val size: Int get() = entries.size
-    operator fun get(key: K): UsageReport? = entries[key]?.first
+    operator fun get(key: K): UsageReport? {
+        val value = entries[key]?.first
+        if (value == null) misses++ else hits++
+        return value
+    }
     fun put(key: K, report: UsageReport) {
         entries.remove(key)?.let { weight -= it.second }
         // Conservative accounting for list/map entries, objects, labels and package strings.
@@ -17,8 +25,8 @@ class ReportCache<K>(private val maxEntries: Int = 12, private val maxWeight: Lo
         entries[key] = report to cost; weight += cost
         val oldest = entries.iterator()
         while (entries.size > maxEntries || weight > maxWeight) {
-            val entry = oldest.next(); weight -= entry.value.second; oldest.remove()
+            val entry = oldest.next(); weight -= entry.value.second; oldest.remove(); evictions++
         }
     }
-    fun clear() { entries.clear(); weight = 0 }
+    fun clear() { entries.clear(); weight = 0; invalidations++ }
 }

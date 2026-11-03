@@ -78,6 +78,72 @@ class StorageSafetyTest{
   fixture{target,_->target.importJson(backup("original",1000));assertTrue(runCatching{target.importBackup(bytes.inputStream())}.isFailure);assertEquals(1,target.readLegacy(Window(0,5000)).intervals.size)}
  }}
 
+ @Test fun supportedVersionsAndUnknownFieldsKeepRepeatedImportIdempotent()=runBlocking{
+  for(version in 1..3)fixture{store,_->
+   val body=org.json.JSONObject(backup("version-$version",1000)).put("version",version)
+   body.put("futureTable",org.json.JSONArray().put(org.json.JSONObject().put("nested",true)))
+   body.getJSONArray("intervals").getJSONObject(0).put("futureScalar","ignored")
+   repeat(2){store.importJson(body.toString())}
+   val rows=store.readLegacy(Window(0,5000)).intervals
+   assertEquals(1,rows.size);assertEquals("version-$version",rows.single().app)
+  }
+ }
+ @Test fun compressedRoundTripPreservesAllFiveRecordTablesAfterInitialDowngrade()=runBlocking{fixture{source,_->
+  val body=org.json.JSONObject(backup("legacy",1000)).put("version",3)
+  body.put("coverage",org.json.JSONArray("""[{"start":1000,"end":2000,"reliable":true}]"""))
+  body.put("apps",org.json.JSONArray("""[{"app":"legacy","label":"fixture"}]"""))
+  body.put("usage_events",org.json.JSONArray("""[{"id":"event","time":1000,"signal":"RESUME","app":"legacy","activity":"Main","instance":"instance","source":"USAGE_EVENTS","zone":"UTC","origin":"LOCAL","rawType":1}]"""))
+  body.put("usage_intervals",org.json.JSONArray("""[{"id":"slice","metric":"PRIMARY","app":"legacy","start":1000,"end":2000,"evidence":"CONFIRMED","reason":"original","sources":"USAGE_EVENTS","refs":"event","provisional":true}]"""))
+  source.importJson(body.toString())
+  val before=org.json.JSONObject(source.exportJson())
+  val compressed=java.io.ByteArrayOutputStream();source.writeCompressedBackup(compressed)
+  fixture{target,_->
+   repeat(2){target.importBackup(compressed.toByteArray().inputStream())}
+   val after=org.json.JSONObject(target.exportJson())
+   for(table in listOf("intervals","coverage","apps","usage_events","usage_intervals")){
+    val expected=before.getJSONArray(table);val actual=after.getJSONArray(table)
+    assertEquals(table,1,expected.length());assertEquals(table,1,actual.length())
+    val left=expected.getJSONObject(0);val right=actual.getJSONObject(0)
+    assertEquals(table,left.keys().asSequence().toSet(),right.keys().asSequence().toSet())
+    left.keys().forEach{key->assertEquals("$table.$key",left.get(key),right.get(key))}
+   }
+   val slice=after.getJSONArray("usage_intervals").getJSONObject(0)
+   assertEquals("INFERRED",slice.getString("evidence"));assertEquals("LEGACY_IMPORT",slice.getString("sources"))
+  }
+ }}
+ private fun batchedBackup():String{
+  val rows=(0..1000).joinToString(","){i->"""{"app":"batch-$i","start":${10000+i*2},"end":${10001+i*2}}"""}
+  return """{"format":"usagetime-backup","intervals":[$rows],"version":1}"""
+ }
+ @Test fun invalidEnvelopeAfterBatchFlushRollsBackEveryIncomingRow()=runBlocking{fixture{store,_->
+  store.importJson(backup("original",1000))
+  val invalid=batchedBackup().replace("\"version\":1","\"version\":99")
+  assertTrue(runCatching{store.importJson(invalid)}.isFailure)
+  val rows=store.readLegacy(Window(0,20000)).intervals
+  assertEquals(1,rows.size);assertEquals("original",rows.single().app)
+  assertTrue(store.storageInfo().snapshots>0)
+ }}
+ @Test fun cancellationAfterBatchFlushRollsBackEveryIncomingRow()=runBlocking{fixture{store,_->
+  store.importJson(backup("original",1000))
+  val body=batchedBackup();val bytes=body.toByteArray(Charsets.UTF_8)
+  val cutoff=body.indexOf("\"version\"");var position=0
+  val cancelled=object:java.io.InputStream(){
+   override fun read():Int{
+    if(position>=cutoff)throw kotlinx.coroutines.CancellationException("isolated backup fixture")
+    return bytes[position++].toInt() and 255
+   }
+   override fun read(buffer:ByteArray,offset:Int,length:Int):Int{
+    if(length==0)return 0
+    if(position>=cutoff)throw kotlinx.coroutines.CancellationException("isolated backup fixture")
+    val size=minOf(length,64,cutoff-position);bytes.copyInto(buffer,offset,position,position+size);position+=size;return size
+   }
+  }
+  val failure=runCatching{store.importBackup(cancelled)}.exceptionOrNull()
+  assertTrue(failure is kotlinx.coroutines.CancellationException)
+  val rows=store.readLegacy(Window(0,20000)).intervals
+  assertEquals(1,rows.size);assertEquals("original",rows.single().app)
+ }}
+
  @Test fun missingOrEmptyMainDbRequiresExplicitRecoveryInsteadOfSilentRecreation()=runBlocking{
   for(empty in listOf(false,true))fixture{store,name->
    store.importJson(backup("surviving",1000));store.createSafetyCopy();store.close()

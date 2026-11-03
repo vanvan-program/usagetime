@@ -10,8 +10,8 @@ android {
         applicationId = "dev.usagetime.app"
         minSdk = 29
         targetSdk = 36
-        versionCode = 20
-        versionName = "0.3.12"
+        versionCode = 21
+        versionName = "0.3.13"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     buildFeatures { compose = true; buildConfig = true }
@@ -20,8 +20,16 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+    signingConfigs {
+        create("personal") {
+            storeFile = rootProject.file(".private/usagetime.jks")
+            storePassword = providers.environmentVariable("USAGETIME_STORE_PASSWORD").orNull
+            keyAlias = "usagetime"
+            keyPassword = providers.environmentVariable("USAGETIME_STORE_PASSWORD").orNull
+        }
+    }
     buildTypes {
-        release { isMinifyEnabled = false }
+        release { isMinifyEnabled = false; signingConfig = signingConfigs.getByName("personal") }
         create("preview") {
             initWith(getByName("debug"))
             isMinifyEnabled = true

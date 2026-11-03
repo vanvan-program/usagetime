@@ -3,6 +3,35 @@ import java.time.*
 import org.junit.Test
 import org.junit.Assert.*
 class StreamingDailyTest{
+ @Test fun databaseReducedDaysPreserveFilteredAvailabilityQualityAndDst(){
+  val z=ZoneId.of("America/New_York");val date=LocalDate.of(2026,3,6)
+  val w=Window(Dates.midnight(date,z),Dates.midnight(date.plusDays(5),z))
+  val days=Reports.slots(w,z,Grain.DAY).mapIndexed{i,slot->
+   listOf(
+    MetricDayCell(slot.start,slot.end,"a",Evidence.CONFIRMED,if(i==0)1000 else 0,0),
+    MetricDayCell(slot.start,slot.end,"b",Evidence.INFERRED,if(i==4)2000 else 0,if(i==4)50 else 0),
+    MetricDayCell(slot.start,slot.end,"b",Evidence.UNKNOWN,0,30),
+    MetricDayCell(slot.start,slot.end,DailyMetrics.SUMMARY,Evidence.UNKNOWN,if(i==1)0 else slot.duration,80),
+    MetricDayCell(slot.start,slot.end,DailyMetrics.OBSERVED,Evidence.CONFIRMED,if(i==1)slot.duration else 500,0))
+  }
+  for(g in listOf(Grain.DAY,Grain.WEEK,Grain.MONTH))for(app in listOf(null,"a","b","absent"))
+   for(confirmed in listOf(false,true))for(legacy in listOf(false,true)){
+    val old=DailyMetrics.Accumulator(w,z,g,app,legacy,confirmed)
+    val reduced=DailyMetrics.Accumulator(w,z,g,app,legacy,confirmed)
+    days.forEach{cells->
+     old.addDay(cells)
+     val summary=cells.single{it.app==DailyMetrics.SUMMARY}
+     val attributed=cells.filter{it.app!=null&&it.app!=DailyMetrics.SUMMARY&&it.app!=DailyMetrics.OBSERVED&&it.evidence in listOf(Evidence.CONFIRMED,Evidence.INFERRED)}
+     reduced.addDayTotals(Window(summary.start,summary.end),
+      attributed.filter{(app==null||it.app==app)&&(confirmed||it.evidence!=Evidence.CONFIRMED)}.sumOf{it.millis},
+      summary.millis,summary.provisional,cells.single{it.app==DailyMetrics.OBSERVED}.millis,attributed.any{it.millis>0})
+     cells.filter{it.app!=null&&it.app!=DailyMetrics.SUMMARY&&it.app!=DailyMetrics.OBSERVED}.groupBy{it.app!!}.forEach{(pkg,rows)->
+      reduced.addAppTotals(pkg,rows.filter{it.evidence==Evidence.CONFIRMED}.sumOf{it.millis},rows.filter{it.evidence==Evidence.INFERRED}.sumOf{it.millis},rows.sumOf{it.provisional})
+     }
+    }
+    assertEquals("$g/$app/$confirmed/$legacy",old.finish(),reduced.finish())
+   }
+ }
  @Test(timeout=15000) fun tenYearsAndHundredAppsDoNotNeedAWholeHistoryList(){
   val z=ZoneId.of("UTC");val start=LocalDate.of(2016,1,1);val end=start.plusYears(10)
   val w=Window(Dates.midnight(start,z),Dates.midnight(end,z));val a=DailyMetrics.Accumulator(w,z,Grain.MONTH)

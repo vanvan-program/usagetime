@@ -13,8 +13,5 @@ class UsageWorker(context:Context,params:WorkerParameters):CoroutineWorker(conte
     }catch(e:kotlinx.coroutines.CancellationException){throw e}catch(_:SyncUnavailable){Result.retry()}catch(_:SecurityException){Result.success()}catch(_:Exception){if(runAttemptCount<3)Result.retry()else Result.failure()}
 }
 class RescheduleReceiver:BroadcastReceiver(){
-    override fun onReceive(context:Context,intent:Intent){if(intent.action in setOf(Intent.ACTION_BOOT_COMPLETED,Intent.ACTION_MY_PACKAGE_REPLACED,Intent.ACTION_USER_UNLOCKED)){
-        UsageTimeApplication.schedule(context)
-        UsageTimeApplication.catchUp(context)
-    }}
+    override fun onReceive(context:Context,intent:Intent){usageWorkScheduler(context).onBroadcast(intent.action)}
 }

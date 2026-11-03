@@ -25,6 +25,10 @@ interface HistoryDao {
     suspend fun rows(zone:String,start:Long,metric:String):List<HistoryDay>
     @Query("SELECT * FROM history_seals WHERE zone=:zone AND dayStart=:start AND metric=:metric")
     suspend fun seal(zone:String,start:Long,metric:String):HistorySeal?
+    @Query("SELECT * FROM history_days WHERE zone=:zone AND metric=:metric AND dayStart>=:start AND dayStart<:end")
+    suspend fun rowsRange(zone:String,start:Long,end:Long,metric:String):List<HistoryDay>
+    @Query("SELECT * FROM history_seals WHERE zone=:zone AND metric=:metric AND dayStart>=:start AND dayStart<:end")
+    suspend fun sealsRange(zone:String,start:Long,end:Long,metric:String):List<HistorySeal>
     @Insert(onConflict=OnConflictStrategy.REPLACE) suspend fun rows(rows:List<HistoryDay>)
     @Insert(onConflict=OnConflictStrategy.REPLACE) suspend fun seal(seal:HistorySeal)
     @Query("DELETE FROM history_days WHERE dayEnd>:start") suspend fun invalidateRows(start:Long)

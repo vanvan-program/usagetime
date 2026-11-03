@@ -5,6 +5,14 @@ import org.junit.Test
 import org.junit.Assert.*
 
 class SelectionTest {
+    @Test fun midnightFollowsCurrentDatesWithoutMovingSelectedHistory(){
+        val yesterday=java.time.LocalDate.of(2026,10,31);val today=yesterday.plusDays(1)
+        val current=Selection(anchor=yesterday,compareA=yesterday,compareB=yesterday.minusWeeks(1))
+        val next=current.followCurrentDate(yesterday,today)
+        assertEquals(today,next.anchor);assertEquals(today,next.compareA);assertEquals(today.minusWeeks(1),next.compareB)
+        val history=current.copy(anchor=yesterday.minusMonths(2),compareA=yesterday.minusMonths(3),compareB=yesterday.minusMonths(4))
+        assertEquals(history,history.followCurrentDate(yesterday,today))
+    }
     @Test fun typingSortingAndChartSwitchDoNotRequireAnotherReport(){
         val previous=Selection()
         assertFalse(previous.copy(query="微信").requiresReport(previous))

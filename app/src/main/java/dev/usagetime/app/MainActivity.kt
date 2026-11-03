@@ -23,6 +23,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -31,6 +32,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.usagetime.core.*
@@ -71,10 +73,16 @@ private val Brown=Color(0xFF8A5F16)
     val colors=if(dark)darkColorScheme(primary=Color(0xFF9BAAF0),secondary=Color(0xFFD5A05A),background=Color(0xFF0A0A0A),surface=Color(0xFF111111),surfaceContainer=Color(0xFF1C1C1C),onSurface=Color(0xFFEDEDED),onSurfaceVariant=Color(0xFFB1B1B1),outlineVariant=Color(0xFF343434))
         else lightColorScheme(primary=Blue,secondary=Brown,background=Color.White,surface=Color.White,surfaceContainer=Color(0xFFF3F3F3),onSurface=Color(0xFF171717),onSurfaceVariant=Color(0xFF5C5C5C),outlineVariant=Color(0xFFE6E6E6))
     val export=rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")){uri->if(uri!=null)scope.launch{
-        try{withContext(Dispatchers.IO){context.contentResolver.openOutputStream(uri)?.use{model.store.writeBackup(it)}?:error("无法写入文件")};model.fullBackupExported();model.message="备份已导出"}catch(e:Exception){model.message="导出失败：${e.message}"}
+        BackupDocumentCoordinator.exportBackup(
+            write={withContext(Dispatchers.IO){context.contentResolver.openOutputStream(uri)?.use{model.store.writeBackup(it)}?:error("无法写入文件")}},
+            markExported=model::fullBackupExported,message={model.message=it},
+            success="备份已导出",failurePrefix="导出失败：")
     }}
     val compressedExport=rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/gzip")){uri->if(uri!=null)scope.launch{
-        try{withContext(Dispatchers.IO){context.contentResolver.openOutputStream(uri)?.use{model.store.writeCompressedBackup(it)}?:error("无法写入文件")};model.fullBackupExported();model.message="压缩完整备份已导出"}catch(e:Exception){model.message="导出未完成，请保留此前副本：${e.message}"}
+        BackupDocumentCoordinator.exportBackup(
+            write={withContext(Dispatchers.IO){context.contentResolver.openOutputStream(uri)?.use{model.store.writeCompressedBackup(it)}?:error("无法写入文件")}},
+            markExported=model::fullBackupExported,message={model.message=it},
+            success="压缩完整备份已导出",failurePrefix="导出未完成，请保留此前副本：")
     }}
     val csv=rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/csv")){uri->if(uri!=null)scope.launch{
         try{val report=model.display.report?:error("暂无记录");withContext(Dispatchers.IO){
@@ -90,20 +98,29 @@ private val Brown=Color(0xFF8A5F16)
         };model.message="报表已导出"}catch(e:Exception){model.message="导出失败：${e.message}"}
     }}
     val import=rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()){uri->if(uri!=null)scope.launch{
-        try{val count=withContext(Dispatchers.IO){
+        BackupDocumentCoordinator.importBackup(read={withContext(Dispatchers.IO){
             context.contentResolver.openInputStream(uri)?.use{model.store.importBackup(it)}?:error("无法读取文件")
-        };model.store.loadNames();model.updateSafetyInfo();model.useDemo(false);model.reload();model.message="已合并 $count 条记录；旧记录保留，导入证据不升级为确定"}catch(e:Exception){model.message="导入失败：${e.message?:"备份格式不正确"}"}
+        }},loadNames={model.store.loadNames()},updateSafety=model::updateSafetyInfo,
+            useDemo=model::useDemo,reload=model::reload,message={model.message=it})
     }}
     DisposableEffect(lifecycle){val observer=LifecycleEventObserver{_,event->if(event==Lifecycle.Event.ON_RESUME)model.refresh()};lifecycle.lifecycle.addObserver(observer);onDispose{lifecycle.lifecycle.removeObserver(observer)}}
+    LaunchedEffect(lifecycle,model){
+        lifecycle.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED){
+            while(true){kotlinx.coroutines.delay(60_000);model.refreshTimeContext()}
+        }
+    }
     LaunchedEffect(model.message){model.message?.let{snack.showSnackbar(it);model.message=null}}
     BackHandler(model.selection.detail){model.navigate(1)}
     MaterialTheme(colorScheme=colors,shapes=Shapes(small=RoundedCornerShape(6.dp),medium=RoundedCornerShape(12.dp),large=RoundedCornerShape(16.dp))){
         if(safetyDialog)StorageSafetyDialog(model){safetyDialog=false}
         diagnosticText?.let{text->AlertDialog(onDismissRequest={diagnosticText=null},title={Text("采集诊断（仅本机）")},text={Text(text,Modifier.heightIn(max=420.dp).verticalScroll(rememberScrollState()),style=MaterialTheme.typography.bodySmall)},confirmButton={TextButton(onClick={diagnosticText=null}){Text("关闭")}})}
         val s=model.selection
+        val rendered=model.display
         val navItems=listOf("总览","应用","对比","设置")
         val navIcons=listOf(Icons.Outlined.Home,Icons.Outlined.Apps,Icons.Outlined.BarChart,Icons.Outlined.Settings)
-        BoxWithConstraints(Modifier.fillMaxSize().background(colors.background)){
+        BoxWithConstraints(Modifier.fillMaxSize().background(colors.background).drawWithContent{
+            drawContent();model.reportDrawn(rendered)
+        }){
             val wide=maxWidth>=600.dp
             Scaffold(containerColor=colors.background,snackbarHost={SnackbarHost(snack)},bottomBar={if(!wide)NavigationBar(containerColor=colors.surface,tonalElevation=0.dp){navItems.forEachIndexed{i,label->NavigationBarItem(selected=s.page==i,onClick={model.navigate(i)},icon={Icon(navIcons[i],null)},label={Text(label)})}}}){padding->
                 Row(Modifier.fillMaxSize().padding(padding)){
@@ -127,7 +144,13 @@ private val Brown=Color(0xFF8A5F16)
                         }
                         when {
                             s.page==3->SettingsScreen(model,onPermission={context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))},onExport={export.launch("用时记备份_${LocalDate.now()}.json")},onImport={import.launch(arrayOf("application/json","text/plain","application/gzip","application/x-gzip","application/octet-stream"))},onCsv={csv.launch("用时记报表_${LocalDate.now()}.csv")},onDiagnostics={scope.launch{
-                                try{diagnosticText=model.store.diagnostics().joinToString("\n\n"){"${it.time} ${it.code}\n${it.detail}"}.ifEmpty{"暂无诊断记录"}}
+                                try{
+                                    val cache=model.store.reportCacheStats()
+                                    val timing="查询 ${"%.1f".format(model.lastLoadMillis)} ms · CPU 首绘 ${model.lastCpuDrawMillis?.let{"%.1f".format(it)}?:"待测量"} ms"
+                                    val hits=cache.hits+cache.misses
+                                    val summary="$timing\n缓存命中 ${cache.hits}/${hits}（${if(hits>0)"%.1f".format(cache.hits*100.0/hits)else"0.0"}%）· 条目 ${cache.entries} · 约 ${cache.estimatedBytes/1024} KiB"
+                                    diagnosticText=(listOf(summary)+model.store.diagnostics().map{"${it.time} ${it.code}\n${it.detail}"}).joinToString("\n\n")
+                                }
                                 catch(e:kotlinx.coroutines.CancellationException){throw e}
                                 catch(e:Exception){model.message="诊断暂时无法读取，请查看数据安全与占用：${e.message}"}
                             }},onRebuild={model.rebuildHistory()},onSafety={model.updateSafetyInfo();safetyDialog=true},onCompressedExport={compressedExport.launch("用时记备份_${LocalDate.now()}.json.gz")})
@@ -185,6 +208,11 @@ private fun customDates(context:android.content.Context,model:UsageModel){
 }
 @Composable private fun StatisticsScreen(model:UsageModel){
     val s=model.selection;val r=model.display.report
+    val apps=remember(r?.apps,s.query,s.nameSort,s.page,model.labelRevision){
+        val filtered=r?.apps.orEmpty().filter{model.label(it.app).contains(s.query,true)||it.app.contains(s.query,true)}
+        if(s.nameSort&&s.page==1)filtered.sortedBy{model.label(it.app)}else filtered
+    }
+    val reversedBuckets=remember(r?.buckets){r?.buckets.orEmpty().asReversed()}
     LazyColumn(Modifier.fillMaxSize(),contentPadding=PaddingValues(start=20.dp,end=20.dp,bottom=20.dp)){
         item{PeriodControls(model)}
         if(model.display.legacyAvailable)item{
@@ -215,14 +243,12 @@ private fun customDates(context:android.content.Context,model:UsageModel){
                     TextButton(onClick={model.change{it.copy(page=2,compareApp=s.app,monthly=s.period==Period.MONTH,compareA=s.anchor,compareB=if(s.period==Period.MONTH)s.anchor.minusMonths(1)else s.anchor.minusWeeks(1),detail=false)}}){Text("对比此应用的历史使用")}
                     SectionTitle("时长明细")
                 }
-                items(r.buckets.reversed(),key={it.start}){b->Row(Modifier.fillMaxWidth().heightIn(min=48.dp),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.SpaceBetween){Text(b.label);Text(if(b.available)durationText(b.millis)else"未记录",color=MaterialTheme.colorScheme.onSurfaceVariant)}}
+                items(reversedBuckets,key={it.start}){b->Row(Modifier.fillMaxWidth().heightIn(min=48.dp),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.SpaceBetween){Text(b.label);Text(if(b.available)durationText(b.millis)else"未记录",color=MaterialTheme.colorScheme.onSurfaceVariant)}}
             }else{
                 item{Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){Text(if(s.page==0)"应用排行"else"${r.apps.size} 个应用",Modifier.weight(1f),style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.SemiBold);Text("占总用时",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant);if(s.page==0)TextButton(onClick={model.navigate(1)}){Text("全部")}}}
                 if(s.page==1)item{OutlinedTextField(value=s.query,onValueChange={q->model.change{it.copy(query=q)}},label={Text("搜索应用")},singleLine=true,modifier=Modifier.fillMaxWidth().padding(bottom=8.dp),leadingIcon={Icon(Icons.Outlined.Search,null)},trailingIcon={if(s.query.isNotEmpty())IconButton(onClick={model.change{it.copy(query="")}}){Icon(Icons.Outlined.Close,"清除搜索")}})
                     Row(verticalAlignment=Alignment.CenterVertically){Text("排序",style=MaterialTheme.typography.bodySmall);TextButton(onClick={model.change{it.copy(nameSort=!it.nameSort)}}){Text(if(s.nameSort)"按名称"else"按时长")}}
                 }
-                var apps=r.apps.filter{model.label(it.app).contains(s.query,true)||it.app.contains(s.query,true)}
-                if(s.nameSort&&s.page==1)apps=apps.sortedBy{model.label(it.app)}
                 if(apps.isEmpty())item{Text(if(s.query.isNotEmpty())"没有找到对应应用，请换个名称。"else"暂无应用记录；授权后打开其他应用，再返回补记。",Modifier.padding(vertical=24.dp),color=MaterialTheme.colorScheme.onSurfaceVariant)}
                 items(if(s.page==0)apps.take(8)else apps,key={it.app}){a->Column{AppRow(model,a.app,a.millis,r.total){model.openApp(a.app)};if(model.showConfirmed)r.appQuality[a.app]?.let{q->Text("确定 ${durationText(q.confirmed)} · 推断 ${durationText(q.inferred)}",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onSurfaceVariant)}}}
             }
@@ -266,6 +292,10 @@ private fun windowLabel(w:Window,z:ZoneId):String {val a=Dates.date(w.start,z);v
 @OptIn(ExperimentalLayoutApi::class)
 @Composable private fun CompareScreen(model:UsageModel){
     val s=model.selection;val context=LocalContext.current;val r=model.display.report;val other=model.display.other
+    val changes=remember(r?.apps,other?.apps){
+        val a=r?.apps.orEmpty().associate{it.app to it.millis};val b=other?.apps.orEmpty().associate{it.app to it.millis}
+        (a.keys+b.keys).map{it to ((a[it]?:0)-(b[it]?:0))}.sortedByDescending{kotlin.math.abs(it.second)}
+    }
     var menu by remember{mutableStateOf(false)}
     LazyColumn(Modifier.fillMaxSize(),contentPadding=PaddingValues(horizontal=20.dp,vertical=8.dp)){
         item{
@@ -276,7 +306,7 @@ private fun windowLabel(w:Window,z:ZoneId):String {val a=Dates.date(w.start,z);v
                 Box{TextButton(onClick={menu=true}){Text(s.compareApp?.let{model.label(it)}?:"全部应用",maxLines=1,overflow=TextOverflow.Ellipsis,modifier=Modifier.widthIn(max=120.dp));Icon(Icons.Outlined.ArrowDropDown,null)}
                     DropdownMenu(expanded=menu,onDismissRequest={menu=false}){
                         DropdownMenuItem(text={Text("全部应用")},onClick={model.change{it.copy(compareApp=null)};menu=false})
-                        val packages=((model.display.all?:r)?.apps.orEmpty()+other?.apps.orEmpty()).map{it.app}.distinct()
+                        val packages=((model.display.all?:r)?.apps.orEmpty()+(model.display.allOther?:other)?.apps.orEmpty()).map{it.app}.distinct()
                         packages.forEach{pkg->DropdownMenuItem(text={Text(model.label(pkg))},onClick={model.change{it.copy(compareApp=pkg)};menu=false})}
                     }
                 }
@@ -314,11 +344,8 @@ private fun windowLabel(w:Window,z:ZoneId):String {val a=Dates.date(w.start,z);v
             }
         }
         if(r!=null&&other!=null&&r.buckets.any{it.available}&&other.buckets.any{it.available}){
-            val a=r.apps.associate{it.app to it.millis};val b=other.apps.associate{it.app to it.millis}
-            val packages=(a.keys+b.keys).sortedByDescending{kotlin.math.abs((a[it]?:0)-(b[it]?:0))}
-            if(packages.isEmpty())item{Text("这两个周期还没有已保存的使用记录。",Modifier.padding(vertical=24.dp),color=MaterialTheme.colorScheme.onSurfaceVariant)}
-            items(packages,key={it}){pkg->
-                val diff=(a[pkg]?:0)-(b[pkg]?:0)
+            if(changes.isEmpty())item{Text("这两个周期还没有已保存的使用记录。",Modifier.padding(vertical=24.dp),color=MaterialTheme.colorScheme.onSurfaceVariant)}
+            items(changes,key={it.first}){(pkg,diff)->
                 Row(Modifier.fillMaxWidth().clickable{model.openApp(pkg)}.heightIn(min=56.dp),verticalAlignment=Alignment.CenterVertically){Text(model.label(pkg),Modifier.weight(1f),maxLines=1,overflow=TextOverflow.Ellipsis);Text("${if(diff>0)"+"else if(diff<0)"−"else""}${durationText(kotlin.math.abs(diff))}",style=MaterialTheme.typography.bodyMedium);Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight,null,Modifier.size(18.dp))}
             }
         }

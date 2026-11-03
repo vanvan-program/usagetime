@@ -29,10 +29,13 @@ import kotlin.math.*
     val density=LocalDensity.current
     val textSize=with(density){11.sp.toPx()}
     val primary=scheme.primary;val secondary=scheme.secondary;val grid=scheme.outlineVariant;val text=scheme.onSurfaceVariant
-    val maxValue=max(left.maxOfOrNull{it.millis}?:0,right?.maxOfOrNull{it.millis}?:0)
+    val maxValue=remember(left,right){max(left.maxOfOrNull{it.millis}?:0,right?.maxOfOrNull{it.millis}?:0)}
     val maxHours=(maxValue/3600000.0*1.1).coerceAtLeast(.5)
     val topHours=listOf(.5,1.0,2.0,4.0,6.0,8.0,12.0,24.0,48.0,96.0,192.0,384.0,768.0,1536.0).firstOrNull{it>=maxHours}?:ceil(maxHours/100)*100
     val maxMs=topHours*3600000
+    val paint=remember(text,textSize){Paint(Paint.ANTI_ALIAS_FLAG).apply{
+        color=text.toArgb();this.textSize=textSize;typeface=android.graphics.Typeface.create("sans-serif",android.graphics.Typeface.NORMAL)
+    }}
     fun pointText(index:Int):String{
         val a=left.getOrNull(index);val b=right?.getOrNull(index)
         fun value(bucket:Bucket?)=if(bucket?.available==true)durationText(bucket.millis)else"未记录"
@@ -51,7 +54,7 @@ import kotlin.math.*
             val l=44.dp.toPx();val r=12.dp.toPx();val t=14.dp.toPx();val bottom=size.height-28.dp.toPx();val width=size.width-l-r;val height=bottom-t;val slot=width/count
             fun x(i:Int)=l+slot*(i+.5f)
             fun y(value:Long)=bottom-(value/maxMs*height).toFloat()
-            val paint=Paint(Paint.ANTI_ALIAS_FLAG).apply{color=text.toArgb();this.textSize=textSize;typeface=android.graphics.Typeface.create("sans-serif",android.graphics.Typeface.NORMAL)}
+            paint.textAlign=Paint.Align.LEFT
             for(i in 0..2){
                 val value=topHours*i/2;val at=bottom-height*i/2
                 drawLine(grid,Offset(l,at),Offset(size.width-r,at),1.dp.toPx(),pathEffect=PathEffect.dashPathEffect(floatArrayOf(2.dp.toPx(),3.dp.toPx())))
