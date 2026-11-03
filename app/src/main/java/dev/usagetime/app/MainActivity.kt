@@ -25,6 +25,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -409,12 +411,26 @@ private fun windowLabel(w:Window,z:ZoneId):String {val a=Dates.date(w.start,z);v
     else Text(if(model.selection.metric==UsageMetric.PRIMARY)"多应用同时resumed且无焦点证据时，归属为未知。"else"不同应用允许重叠；生命周期候选不等于已证明的窗口可见。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
 }
 @Composable private fun QualityStatus(report:UsageReport,label:String="数据可信状态"){
+    var showHelp by remember(label){mutableStateOf(false)}
     report.quality?.let{q->Column(Modifier.fillMaxWidth().padding(bottom=10.dp)){
-        Text(label,style=MaterialTheme.typography.labelMedium)
+        Row(verticalAlignment=Alignment.CenterVertically){
+            Text(label,style=MaterialTheme.typography.labelMedium)
+            TextButton(onClick={showHelp=true},contentPadding=PaddingValues(8.dp,0.dp),modifier=Modifier.heightIn(min=32.dp).semantics{contentDescription="查看${label}说明"}){
+                Text("?",style=MaterialTheme.typography.labelLarge,fontWeight=FontWeight.Bold)
+            }
+        }
         Text("已确认 ${durationText(q.confirmed)} · 候选估计 ${durationText(q.inferred)}",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
         Text("无法确定 ${durationText(q.unknown)} · 未闭合 ${durationText(q.provisional)}",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
-        Text("候选不代表已证明的实际用时；可与未知区间重叠，不能相加。未闭合区间不计入累计。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
     }}
+    if(showHelp)AlertDialog(onDismissRequest={showHelp=false},title={Text("${label}说明")},
+        text={Column(Modifier.heightIn(max=460.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(8.dp)){
+            Text("已确认：有足够证据，可直接计入累计的时长。")
+            Text("候选估计：根据应用生命周期推断，但尚未证明为实际使用的时长。")
+            Text("无法确定：证据不足，暂时无法归属到具体应用的时长。")
+            Text("未闭合：当前周期尚未结算的区间，不计入累计。")
+            Text("候选估计可能与无法确定区间重叠，不能相加；候选也不代表已证明的实际用时。",color=MaterialTheme.colorScheme.onSurfaceVariant)
+        }},
+        confirmButton={TextButton(onClick={showHelp=false}){Text("知道了")}})
 }
 
 @Composable private fun StorageSafetyDialog(model:UsageModel,onDismiss:()->Unit){
