@@ -49,6 +49,7 @@ class UsageModel(application:Application,val store:dev.usagetime.app.data.UsageS
         beginTrace={android.os.Trace.beginAsyncSection("UsageReport.load",it)},
         endTrace={android.os.Trace.endAsyncSection("UsageReport.load",it)})
     private var refreshJob:Job?=null
+    private var reportSelection:Selection?=null
     fun reportDrawn(data:DisplayData){
         if(selection.page<3&&data===pendingDraw){
             lastCpuDrawMillis=(android.os.SystemClock.elapsedRealtimeNanos()-drawRequestedAt)/1_000_000.0
@@ -127,26 +128,35 @@ class UsageModel(application:Application,val store:dev.usagetime.app.data.UsageS
     fun period(value:Period){change{it.copy(period=value,anchor=Dates.date(wallClock(),ZoneId.systemDefault()),grain=Grain.MONTH)}}
     fun move(direction:Long){change{it.copy(anchor=when(it.period){Period.WEEK,Period.DAYS7->it.anchor.plusWeeks(direction);Period.MONTH->it.anchor.plusMonths(direction);Period.DAYS30->it.anchor.plusDays(30*direction);else->it.anchor.plusDays(direction)})}}
     fun reload(){
-        if(selection.page==3){reportRequests.stop();return}
+        if(selection.page==3){reportRequests.stop();display=display.invalidateReport();return}
         reportRequests.cancel()
         val isDemo=demo;val clock=if(isDemo)now else wallClock();val z=ZoneId.systemDefault();val includeConfirmed=showConfirmed
         val today=Dates.date(clock,z)
         if(today!=observedToday){selection=selection.followCurrentDate(observedToday,today);observedToday=today}
         val s=selection
+        reportSelection=s
         now=clock
         val requestedAt=android.os.SystemClock.elapsedRealtimeNanos()
-        reportRequests.submit(load={
-            withContext(Dispatchers.Default){
-                ReportLoader(
-                    first={store.first()},last={store.last()},hasLegacy={store.hasLegacy(it)},
-                    aggregate={w,g,pkg->if(s.legacy)store.aggregateLegacy(w,z,g,pkg)else store.aggregate(w,z,g,s.metric,pkg,includeConfirmed)}
-                ).load(s,clock,z,if(isDemo)sample(clock,z)else null)
-            }
-        }){result->
+        reportRequests.submit(load={loadDisplay(s,isDemo,clock,z,includeConfirmed)}){result->
             display=result;zone=z;loadError=null
             pendingDraw=result;drawRequestedAt=requestedAt;lastCpuDrawMillis=null
             lastLoadMillis=(android.os.SystemClock.elapsedRealtimeNanos()-requestedAt)/1_000_000.0
             if(!isDemo)warmLabels(result)
+        }
+    }
+    private suspend fun loadDisplay(s:Selection,isDemo:Boolean,clock:Long,z:ZoneId,includeConfirmed:Boolean)=withContext(Dispatchers.Default){
+        ReportLoader(
+            first={store.first()},last={store.last()},hasLegacy={store.hasLegacy(it)},
+            aggregate={w,g,pkg->if(s.legacy)store.aggregateLegacy(w,z,g,pkg)else store.aggregate(w,z,g,s.metric,pkg,includeConfirmed)}
+        ).load(s,clock,z,if(isDemo)sample(clock,z)else null)
+    }
+    internal suspend fun exportReport():ReportExportSnapshot{
+        val current=ReportExportRequest.selection(selection,reportSelection)
+        val includeConfirmed=showConfirmed
+        val clock=wallClock()
+        val z=ZoneId.systemDefault()
+        return ReportExportRequest.load(demo,current,includeConfirmed,clock,z){snapshot,confirmed,at,zone->
+            loadDisplay(snapshot,false,at,zone,confirmed)
         }
     }
     private fun warmLabels(data:DisplayData){

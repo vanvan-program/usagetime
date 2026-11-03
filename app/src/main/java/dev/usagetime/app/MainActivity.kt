@@ -87,15 +87,8 @@ private val Brown=Color(0xFF8A5F16)
             success="压缩完整备份已导出",failurePrefix="导出未完成，请保留此前副本：")
     }}
     val csv=rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/csv")){uri->if(uri!=null)scope.launch{
-        try{val report=model.display.report?:error("暂无记录");withContext(Dispatchers.IO){
-            fun cell(text:String)="\""+(if(text.startsWith("=")||text.startsWith("+")||text.startsWith("-")||text.startsWith("@"))"'$text" else text).replace("\"","\"\"")+"\""
-            val metric=cell(if(model.selection.legacy)"旧版未分级"else model.selection.metric.label)
-            val q=report.quality
-            val basis=cell(if(model.selection.legacy)"旧版未分级"else if(model.showConfirmed)"已确认与候选估计"else"仅候选估计")
-            val note=cell("候选可能与未知覆盖重叠，不能相加；未闭合不计入累计；毫秒是事件记录单位")
-            val summary="范围汇总,$metric,所选范围,,${report.total},${q?.confirmed?:""},${q?.inferred?:""},${q?.unknown?:""},${q?.provisional?:""},$basis,$note"
-            val rows=report.apps.map{val aq=report.appQuality[it.app];"应用,$metric,${cell(model.label(it.app))},${cell(it.app)},${it.millis},${aq?.confirmed?:""},${aq?.inferred?:""},,${aq?.provisional?:""},$basis,$note"}
-            val body="\uFEFF记录类型,指标,应用,包名,统计累计毫秒,已确认毫秒,候选估计毫秒,范围未知覆盖毫秒,未闭合覆盖毫秒,累计口径,口径说明\r\n"+(listOf(summary)+rows).joinToString("\r\n")
+        try{val snapshot=model.exportReport();withContext(Dispatchers.IO){
+            val body=CsvReportFormat.build(snapshot,model::label)
             context.contentResolver.openOutputStream(uri)?.use{it.write(body.toByteArray())}?:error("无法写入文件")
         };model.message="报表已导出"}catch(e:Exception){model.message="导出失败：${e.message}"}
     }}
