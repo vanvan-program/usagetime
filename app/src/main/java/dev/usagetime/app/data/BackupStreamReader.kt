@@ -14,7 +14,7 @@ import org.json.JSONObject
 internal object BackupStreamReader {
     private val arrayTables = setOf(
         "intervals", "coverage", "apps", "usage_events", "usage_intervals",
-        "history_days", "history_seals", "retention_state", "sync_checkpoints", "diagnostic_logs",
+        "history_days", "history_seals", "retention_state", "sync_checkpoints", "diagnostic_logs", "app_categories",
     )
 
     internal interface Sink {
@@ -85,5 +85,6 @@ internal object BackupStreamReader {
         reader.endObject()
         require(format == "usagetime-backup" && version in 1..3) { "不是受支持的用时记备份" }
         require(reader.peek() == JsonToken.END_DOCUMENT) { "备份存在额外内容" }
+        if (decoded is GZIPInputStream) require(decoded.read() == -1) { "压缩备份未完整结束" }
     }
 }

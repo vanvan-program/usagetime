@@ -6,12 +6,12 @@ import subprocess
 import sys
 
 root = Path(__file__).resolve().parents[1]
-allowed_roots = {"app", "core", "gradle", "tools", "docs"}
+allowed_roots = {"app", "core", "gradle", "tools", "docs", ".github"}
 allowed_files = {
     ".gitignore", "README.md", "CHANGELOG.md", "LICENSE", "build-local.ps1", "build.gradle.kts",
     "settings.gradle.kts", "gradle.properties", "gradlew", "gradlew.bat",
 }
-allowed_suffixes = {".kt", ".kts", ".xml", ".json", ".md", ".py", ".pro", ".properties"}
+allowed_suffixes = {".kt", ".kts", ".xml", ".json", ".md", ".py", ".pro", ".properties", ".yml"}
 patterns = {
     "absolute_windows_path": r"(?<![A-Za-z])[A-Za-z]:[\\/]",
     "personal_home_path": r"(?i)/(?:Users|home)/[^/\s]+/",
@@ -23,7 +23,7 @@ patterns = {
 }
 if (root / ".git").exists():
     result = subprocess.run(
-        ["git", "ls-files", "-z"], cwd=root, check=True, capture_output=True
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=root, check=True, capture_output=True
     )
     paths = [root / p.decode("utf-8") for p in result.stdout.split(b"\0") if p]
 else:
@@ -45,7 +45,7 @@ for path in paths:
     if name not in allowed_files and path.suffix not in allowed_suffixes:
         findings.append({"file": name, "rule": "unexpected_file_type"})
         continue
-    if "build" in rel.parts or any(part.startswith(".") for part in rel.parts[:-1]):
+    if "build" in rel.parts or any(part.startswith(".") and part != ".github" for part in rel.parts[:-1]):
         findings.append({"file": name, "rule": "generated_or_hidden_directory"})
     if path.is_symlink():
         findings.append({"file": name, "rule": "symbolic_link"})

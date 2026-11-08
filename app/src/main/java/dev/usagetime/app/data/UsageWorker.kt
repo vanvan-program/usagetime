@@ -9,6 +9,7 @@ class UsageWorker(context:Context,params:WorkerParameters):CoroutineWorker(conte
         if(!applicationContext.getSystemService(android.os.UserManager::class.java).isUserUnlocked)throw SyncUnavailable("用户解锁后补记")
         val store=(applicationContext as UsageTimeApplication).store
         if(store.recording)store.collect()
+        dev.usagetime.app.UsageWidgetProvider.requestUpdate(applicationContext)
         Result.success()
     }catch(e:kotlinx.coroutines.CancellationException){throw e}catch(_:SyncUnavailable){Result.retry()}catch(_:SecurityException){Result.success()}catch(_:Exception){if(runAttemptCount<3)Result.retry()else Result.failure()}
 }

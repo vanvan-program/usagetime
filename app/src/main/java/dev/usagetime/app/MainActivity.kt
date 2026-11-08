@@ -330,8 +330,9 @@ fun UsageApp(model: UsageModel = viewModel()) {
 
         val s = model.selection
         val rendered = model.display
-        val navItems = listOf("总览", "应用", "对比", "设置")
-        val navIcons = listOf(Icons.Outlined.QueryStats, Icons.Outlined.Apps, Icons.Outlined.BarChart, Icons.Outlined.Settings)
+        val navItems = listOf("总览", "应用", "对比", "分析", "设置")
+        val navPages = listOf(0, 1, 2, 4, 3)
+        val navIcons = listOf(Icons.Outlined.QueryStats, Icons.Outlined.Apps, Icons.Outlined.BarChart, Icons.Outlined.CalendarMonth, Icons.Outlined.Settings)
 
         HindsightBackdrop {
             BoxWithConstraints(
@@ -352,8 +353,8 @@ fun UsageApp(model: UsageModel = viewModel()) {
                             HindsightBottomNavigation(
                                 labels = navItems,
                                 icons = navIcons,
-                                selected = s.page,
-                                onNavigate = model::navigate
+                                selected = navPages.indexOf(s.page),
+                                onNavigate = { model.navigate(navPages[it]) }
                             )
                         }
                     }
@@ -363,8 +364,8 @@ fun UsageApp(model: UsageModel = viewModel()) {
                             HindsightNavigationRail(
                                 labels = navItems,
                                 icons = navIcons,
-                                selected = s.page,
-                                onNavigate = model::navigate
+                                selected = navPages.indexOf(s.page),
+                                onNavigate = { model.navigate(navPages[it]) }
                             )
                         }
                         Column(
@@ -443,6 +444,7 @@ fun UsageApp(model: UsageModel = viewModel()) {
                                 !model.permitted && !model.demo && model.display.first == null -> PermissionScreen(model) {
                                     context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
                                 }
+                                s.page == 4 -> InsightsScreen(model)
                                 s.page == 2 -> CompareScreen(model)
                                 else -> StatisticsScreen(model)
                             }
@@ -804,7 +806,9 @@ private fun StatisticsScreen(model: UsageModel) {
                 )
             } else if (s.page == 0) {
                 HindsightPageTitle(
-                    title = periodTitle(s.period),
+                    title = if (s.period == Period.TODAY && s.anchor != LocalDate.now()) {
+                        s.anchor.format(DateTimeFormatter.ofPattern("yyyy年M月d日"))
+                    } else periodTitle(s.period),
                     subtitle = periodSubtitle(model, r),
                     eyebrow = "使用时间"
                 )
@@ -855,6 +859,7 @@ private fun StatisticsScreen(model: UsageModel) {
         }
 
         if (r != null) {
+            if (!s.detail) item { CategorySummaryCard(model, r) }
             if (s.page == 1 && !s.detail) {
                 item { SearchAndSortCard(model) }
                 if (apps.isEmpty()) {
@@ -1007,6 +1012,7 @@ private fun DetailHeader(model: UsageModel, pkg: String, subtitle: String) {
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
+            CategoryPicker(model, pkg)
             Spacer(Modifier.height(2.dp))
             Text(
                 subtitle,
@@ -1780,6 +1786,9 @@ private fun SettingsScreen(
                 }
             }
         }
+
+        SectionLabel("桌面小组件")
+        WidgetSettingsCard()
 
         SectionLabel("关于用时记")
         HindsightCard {

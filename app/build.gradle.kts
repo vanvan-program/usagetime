@@ -10,8 +10,8 @@ android {
         applicationId = "dev.usagetime.app"
         minSdk = 29
         targetSdk = 36
-        versionCode = 24
-        versionName = "0.3.16"
+        versionCode = 25
+        versionName = "0.3.17"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     buildFeatures { compose = true; buildConfig = true }
@@ -21,6 +21,14 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     signingConfigs {
+        getByName("debug") {
+            providers.environmentVariable("USAGETIME_KEYSTORE_PATH").orNull?.let { path ->
+                storeFile = file(path)
+                storePassword = providers.environmentVariable("USAGETIME_KEYSTORE_PASSWORD").get()
+                keyAlias = providers.environmentVariable("USAGETIME_KEY_ALIAS").get()
+                keyPassword = providers.environmentVariable("USAGETIME_KEY_PASSWORD").get()
+            }
+        }
         create("personal") {
             storeFile = rootProject.file(".private/usagetime.jks")
             storePassword = providers.environmentVariable("USAGETIME_STORE_PASSWORD").orNull

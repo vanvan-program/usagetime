@@ -101,7 +101,7 @@ assert db.execute('SELECT COUNT(*) FROM daily_usage').fetchone()[0]==0
 print('PASS: earlier evidence closure invalidates affected caches in every time zone')
 
 store_source=(root/'app/src/main/java/dev/usagetime/app/data/UsageStore.kt').read_text(encoding='utf-8')
-first_query=next(q for q in re.findall(r'@Query\("([^"\n]+)"\)',store_source) if 'UNION ALL SELECT start FROM intervals' in q)
+first_query=next(q for q in re.findall(r'@Query\("([^"\n]+)"\)',store_source) if 'FROM coverage UNION ALL SELECT MIN(start) AS value FROM intervals' in q)
 fixture=sqlite3.connect(':memory:')
 for table in old['entities']:fixture.execute(table['createSql'].replace('${TABLE_NAME}',table['tableName']))
 fixture.execute("INSERT INTO intervals VALUES('fixture',1000,2000)")

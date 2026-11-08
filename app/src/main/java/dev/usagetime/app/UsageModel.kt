@@ -6,6 +6,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.usagetime.app.data.Records
+import dev.usagetime.app.data.CategoryPreferences
 import dev.usagetime.core.*
 import dev.usagetime.core.Period
 import kotlinx.coroutines.*
@@ -16,9 +17,21 @@ import kotlin.random.Random
 class UsageModel(application:Application,val store:dev.usagetime.app.data.UsageStore,private val wallClock:()->Long=System::currentTimeMillis):AndroidViewModel(application){
     constructor(application:Application):this(application,(application as UsageTimeApplication).store)
     private val prefs=application.getSharedPreferences("usage-settings",0)
+    private val categoryPreferences=CategoryPreferences(application)
+    var categories by mutableStateOf(categoryPreferences.read());private set
+    private var demoCategories by mutableStateOf<Map<String,AppCategory>>(emptyMap())
+    val categoryAssignments:Map<String,AppCategory> get()=if(demo)demoCategories else categories
+    var insights by mutableStateOf(InsightData());private set
+    var insightsLoading by mutableStateOf(false);private set
+    var insightsError by mutableStateOf<String?>(null);private set
+    private var insightJob:Job?=null
+    private var insightGeneration=0
     var safetyInfo by mutableStateOf(store.storageInfo());private set
     private val initialDate=Dates.date(wallClock(),ZoneId.systemDefault())
-    var selection by mutableStateOf(Selection(anchor=initialDate,compareA=initialDate,compareB=initialDate.minusWeeks(1)));private set
+    var selection by mutableStateOf(Selection(
+        anchor=initialDate,compareA=initialDate,compareB=initialDate.minusWeeks(1),
+        metric=UsageMetric.entries.firstOrNull{it.name==prefs.getString("widget-metric","")}?:UsageMetric.PRIMARY,
+        legacy=prefs.getBoolean("widget-legacy",false)));private set
     var display by mutableStateOf(DisplayData());private set
     var demo by mutableStateOf(false);private set
     var permitted by mutableStateOf(false);private set
@@ -67,17 +80,59 @@ class UsageModel(application:Application,val store:dev.usagetime.app.data.UsageS
     fun change(update:(Selection)->Selection){
         val previous=selection
         selection=update(previous)
+        if(!demo&&(selection.metric!=previous.metric||selection.legacy!=previous.legacy)){
+            prefs.edit().putString("widget-metric",selection.metric.name).putBoolean("widget-legacy",selection.legacy).apply()
+            UsageWidgetProvider.requestUpdate(getApplication())
+        }
         // These controls only render/filter the already loaded report, even while a query is running.
         if(selection.requiresReport(previous))reload()
     }
     fun navigate(page:Int){change{it.copy(page=page,detail=false,app=null,query="")}}
     fun openApp(pkg:String){change{it.copy(page=1,detail=true,app=pkg,line=true,period=if(it.page==2){if(it.monthly)Period.MONTH else Period.WEEK}else it.period,anchor=if(it.page==2)it.compareA else it.anchor)}}
     fun useDemo(value:Boolean){demo=value;now=wallClock();reload()}
-    fun theme(value:String){appearance=value;prefs.edit().putString("theme",value).apply()}
+    fun assignCategory(pkg:String,category:AppCategory){
+        if(demo)demoCategories=demoCategories+(pkg to category)
+        else{categories=categoryPreferences.save(pkg,category);UsageWidgetProvider.requestUpdate(getApplication())}
+    }
+    fun openDate(date:LocalDate){change{it.copy(page=0,period=Period.TODAY,anchor=date,app=null,detail=false)}}
+    fun loadInsights(year:Int){
+        insightJob?.cancel()
+        val generation=++insightGeneration
+        insights=InsightData(year)
+        val isDemo=demo;val clock=wallClock();val currentZone=ZoneId.systemDefault()
+        val metric=selection.metric;val legacy=selection.legacy;val confirmed=showConfirmed
+        insightJob=viewModelScope.launch{
+            insightsLoading=true;insightsError=null
+            try{
+                val result=withContext(Dispatchers.Default){
+                    val day=Dates.date(clock,currentZone)
+                    val start=Dates.midnight(LocalDate.of(year,1,1),currentZone)
+                    val end=minOf(Dates.midnight(LocalDate.of(year+1,1,1),currentZone),clock)
+                    val todayWindow=Window(Dates.midnight(day,currentZone),clock)
+                    val sample=if(isDemo)sample(clock,currentZone)else null
+                    val report=if(end<=start)null else if(sample!=null){
+                        Reports.build(sample.intervals,sample.coverage,Window(start,end),currentZone,Grain.DAY)
+                    }else if(legacy)store.aggregateLegacy(Window(start,end),currentZone,Grain.DAY,null)
+                    else store.aggregate(Window(start,end),currentZone,Grain.DAY,metric,null,confirmed)
+                    val slices=if(sample!=null)sample.intervals.map{
+                        UsageSlice(metric,it.app,it.start,it.end,Evidence.INFERRED,"SYNTHETIC_DEMO",setOf(EvidenceSource.TEST),emptySet())
+                    }else if(legacy)store.readLegacy(todayWindow).intervals.map{
+                        UsageSlice(metric,it.app,it.start,it.end,Evidence.LEGACY,"LEGACY",setOf(EvidenceSource.LEGACY_IMPORT),emptySet())
+                    }else store.read(todayWindow,metric).slices
+                    InsightData(year,UsageInsights.timeline(slices,metric,todayWindow),UsageInsights.calendar(report?.buckets.orEmpty(),currentZone))
+                }
+                insights=result
+            }catch(error:CancellationException){throw error}
+            catch(error:Exception){insightsError="分析暂时无法读取，请重试：${error.message}"}
+            finally{if(generation==insightGeneration)insightsLoading=false}
+        }
+    }
+    fun theme(value:String){appearance=value;prefs.edit().putString("theme",value).apply();UsageWidgetProvider.requestUpdate(getApplication())}
     fun showConfirmed(value:Boolean){
         if(showConfirmed==value)return
         showConfirmed=value
         prefs.edit().putBoolean("show-confirmed",value).apply()
+        UsageWidgetProvider.requestUpdate(getApplication())
         display=DisplayData(first=display.first,last=display.last)
         reload()
     }
@@ -104,7 +159,7 @@ class UsageModel(application:Application,val store:dev.usagetime.app.data.UsageS
             try{if(!demo){val text=store.collect();if(permitted&&recording&&text!="已保存最新记录")message=text}}
             catch(e:CancellationException){throw e}
             catch(e:Exception){syncError="补记失败：${e.message?:e.javaClass.simpleName}";message=syncError}
-            finally{now=wallClock();busy=false;permitted=store.permitted();safetyInfo=store.storageInfo();reload()}
+            finally{now=wallClock();busy=false;permitted=store.permitted();safetyInfo=store.storageInfo();reload();if(!demo)UsageWidgetProvider.requestUpdate(getApplication())}
         }
     }
     fun rebuildHistory(){
@@ -128,7 +183,8 @@ class UsageModel(application:Application,val store:dev.usagetime.app.data.UsageS
     fun period(value:Period){change{it.copy(period=value,anchor=Dates.date(wallClock(),ZoneId.systemDefault()),grain=Grain.MONTH)}}
     fun move(direction:Long){change{it.copy(anchor=when(it.period){Period.WEEK,Period.DAYS7->it.anchor.plusWeeks(direction);Period.MONTH->it.anchor.plusMonths(direction);Period.DAYS30->it.anchor.plusDays(30*direction);else->it.anchor.plusDays(direction)})}}
     fun reload(){
-        if(selection.page==3){reportRequests.stop();display=display.invalidateReport();return}
+        if(!demo)categories=categoryPreferences.read()
+        if(selection.page==3||selection.page==4){reportRequests.stop();display=display.invalidateReport();return}
         reportRequests.cancel()
         val isDemo=demo;val clock=if(isDemo)now else wallClock();val z=ZoneId.systemDefault();val includeConfirmed=showConfirmed
         val today=Dates.date(clock,z)

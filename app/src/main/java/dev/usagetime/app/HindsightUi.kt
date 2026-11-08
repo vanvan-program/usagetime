@@ -29,6 +29,7 @@ import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.Typography
@@ -342,7 +343,9 @@ fun HindsightCard(
             .border(1.dp, c.border, shape)
             .padding(contentPadding)
     ) {
-        Column(content = content)
+        CompositionLocalProvider(LocalContentColor provides c.textStrong) {
+            Column(content = content)
+        }
     }
 }
 

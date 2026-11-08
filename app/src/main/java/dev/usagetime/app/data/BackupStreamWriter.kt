@@ -6,10 +6,11 @@ import java.io.OutputStream
 import java.io.OutputStreamWriter
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import dev.usagetime.core.AppCategory
 
 /** Writes the existing backup format; the caller owns the snapshot lock and transaction. */
 internal object BackupStreamWriter {
-    suspend fun write(output: OutputStream, query: (String) -> Cursor) {
+    suspend fun write(output: OutputStream, categories: Map<String, AppCategory> = emptyMap(), query: (String) -> Cursor) {
         val writer = JsonWriter(OutputStreamWriter(output, Charsets.UTF_8))
         writer.beginObject().name("format").value("usagetime-backup").name("version").value(3L).name("exportedAt").value(System.currentTimeMillis())
         val tables = listOf("intervals", "coverage", "apps", "usage_events", "usage_intervals", "history_days", "history_seals", "retention_state", "sync_checkpoints", "diagnostic_logs")
@@ -31,6 +32,13 @@ internal object BackupStreamWriter {
                     }
                     writer.endObject()
                 }
+            }
+            writer.endArray()
+        }
+        if (categories.isNotEmpty()) {
+            writer.name("app_categories").beginArray()
+            categories.forEach { (app, category) ->
+                writer.beginObject().name("app").value(app).name("category").value(category.name).endObject()
             }
             writer.endArray()
         }

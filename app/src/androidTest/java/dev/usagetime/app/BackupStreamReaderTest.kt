@@ -99,7 +99,7 @@ class BackupStreamReaderTest {
         val allowed = (1..31).joinToString(",") { "\"f$it\":$it" }
         val rejected = (1..32).joinToString(",") { "\"f$it\":$it" }
         assertEquals(31, parse(
-            """{"format":"usagetime-backup","version":1,"apps":[$allowed]}"""
+            """{"format":"usagetime-backup","version":1,"apps":[{${allowed}}]}"""
         ).rows.single().second.length())
         assertTrue(runCatching {
             parse("""{"format":"usagetime-backup","version":1,"apps":[{${rejected}}]}""")
@@ -131,10 +131,12 @@ class BackupStreamReaderTest {
         BackupStreamReader.read(owned, RecordingSink())
         assertFalse(owned.closed)
 
-        val truncated = payload.copyOf(payload.size - 4)
-        assertTrue(runCatching {
-            BackupStreamReader.read(truncated.inputStream(), RecordingSink())
-        }.isFailure)
+        for (missingBytes in 1..8) {
+            val truncated = payload.copyOf(payload.size - missingBytes)
+            assertTrue("missing footer bytes: $missingBytes", runCatching {
+                BackupStreamReader.read(truncated.inputStream(), RecordingSink())
+            }.isFailure)
+        }
     }
 
     @Test fun thousandthRecordRunsCancellationAndCheckpointBeforeRow() = runBlocking {

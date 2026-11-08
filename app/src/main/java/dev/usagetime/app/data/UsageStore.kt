@@ -109,6 +109,7 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
             reportCache[key]?:build().also{currentCoroutineContext().ensureActive();reportCache.put(key,it)}
         }}
     private val preferences=context.getSharedPreferences(if(databaseName=="usage-history.db")"usage-settings"else"usage-settings-$databaseName",Context.MODE_PRIVATE)
+    private val categoryPreferences=CategoryPreferences(context,if(databaseName=="usage-history.db")"usage-categories"else"usage-categories-$databaseName")
     private val names=ConcurrentHashMap<String,String>()
     private var testQuery:((Long,Long,String)->Sequence<StoredEvent>)?=null
     private var testClock:(()->ClockSample)?=null
@@ -771,10 +772,11 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
     suspend fun exportJson():String {val out=java.io.ByteArrayOutputStream();writeBackup(out);return out.toString("UTF-8")}
     /** Streaming SQLite snapshot. Database/OS credentials and the active checkpoint are not restored. */
     suspend fun writeBackup(output:java.io.OutputStream)=withContext(Dispatchers.IO){mutex.withLock{database.withTransaction{
-        BackupStreamWriter.write(output){database.openHelper.readableDatabase.query(it)}
+        BackupStreamWriter.write(output,categoryPreferences.read()){database.openHelper.readableDatabase.query(it)}
     }}}
     suspend fun importBackup(input:java.io.InputStream):Long=withContext(Dispatchers.IO){mutex.withLock{
         ensureWriteSpace();invalidateReports();snapshotInsideLock(true)
+        val importedCategories=linkedMapOf<String,AppCategory>()
         val importedTotal=database.withTransaction{
         var imported=0L;var importedDetailStart:Long?=null
         val raw=database.openHelper.writableDatabase
@@ -795,6 +797,11 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
             override suspend fun endArray(table:String){batches.flushBatches()}
             override suspend fun row(table:String,row:JSONObject){
                 when(table){
+                    "app_categories"->{
+                        val app=row.getString("app")
+                        require(app.isNotBlank()&&app.length<=255&&importedCategories.size<10000)
+                        importedCategories[app]=AppCategory.valueOf(row.getString("category"))
+                    }
                     "intervals"->{val value=decoder.interval(row);batches.addInterval(value,value.app.length*2L+64);imported++}
                     "coverage"->{val value=decoder.coverage(row);dao.coverage(listOf(value));if(value.reliable)dao.upgradeCoverage(value.start,value.end)}
                     "apps"->{dao.apps(listOf(decoder.app(row)))}
@@ -839,6 +846,7 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         imported
         }
         maintainAndSnapshot(true)
+        categoryPreferences.merge(importedCategories)
         importedTotal
     }}
     suspend fun importJson(text:String):Long=importBackup(text.byteInputStream())
