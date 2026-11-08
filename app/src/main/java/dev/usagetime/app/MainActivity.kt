@@ -190,12 +190,33 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        setContent { UsageApp() }
+        widgetNavigation = widgetNavigation(intent)
+        setContent { UsageApp(widgetNavigation = widgetNavigation) }
+    }
+
+    private var widgetNavigation by mutableStateOf<WidgetNavigation?>(null)
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        widgetNavigation = widgetNavigation(intent)
+    }
+
+    private fun widgetNavigation(intent: Intent): WidgetNavigation? {
+        if (!intent.hasExtra(UsageWidgetProvider.EXTRA_PAGE)) return null
+        return WidgetNavigation(
+            page = intent.getIntExtra(UsageWidgetProvider.EXTRA_PAGE, 0).let { if (it == 1) 1 else 0 },
+            app = intent.getStringExtra(UsageWidgetProvider.EXTRA_APP),
+            week = intent.getBooleanExtra(UsageWidgetProvider.EXTRA_WEEK, false),
+            request = System.nanoTime()
+        )
     }
 }
 
+data class WidgetNavigation(val page: Int, val app: String?, val week: Boolean, val request: Long)
+
 @Composable
-fun UsageApp(model: UsageModel = viewModel()) {
+fun UsageApp(model: UsageModel = viewModel(), widgetNavigation: WidgetNavigation? = null) {
     var safetyDialog by remember { mutableStateOf(false) }
     var diagnosticText by remember { mutableStateOf<String?>(null) }
     val context = LocalContext.current
@@ -204,6 +225,18 @@ fun UsageApp(model: UsageModel = viewModel()) {
     val snack = remember { SnackbarHostState() }
     val systemDark = androidx.compose.foundation.isSystemInDarkTheme()
     val dark = model.appearance == "dark" || (model.appearance == "system" && systemDark)
+
+    LaunchedEffect(widgetNavigation) {
+        widgetNavigation?.let { destination ->
+            if (model.demo) model.useDemo(false)
+            model.change { it.copy(
+                page = destination.page,
+                anchor = Dates.date(System.currentTimeMillis(), model.zone),
+                period = if (destination.week) dev.usagetime.core.Period.DAYS7 else dev.usagetime.core.Period.TODAY,
+                detail = destination.app != null, app = destination.app, query = ""
+            ) }
+        }
+    }
 
     SideEffect {
         (context as? ComponentActivity)?.enableEdgeToEdge(

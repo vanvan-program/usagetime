@@ -1,0 +1,6 @@
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:minWidth="180dp" android:minHeight="130dp"
+    android:minResizeWidth="160dp" android:minResizeHeight="110dp"
+    android:initialLayout="@layout/usage_widget_categories"
+    android:updatePeriodMillis="1800000" android:resizeMode="horizontal|vertical"
+    android:widgetCategory="home_screen" android:description="@string/widget_categories_description" />

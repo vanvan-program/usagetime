@@ -1,0 +1,20 @@
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root" style="@style/UsageWidgetRoot" android:padding="8dp">
+    <include layout="@layout/widget_header" android:layout_width="match_parent" android:layout_height="22dp" />
+    <LinearLayout android:layout_width="match_parent" android:layout_height="28dp"
+        android:orientation="horizontal" android:gravity="center_vertical">
+        <TextView android:id="@+id/widget_total" style="@style/UsageWidgetTotal"
+            android:layout_width="0dp" android:layout_weight="1"
+            android:layout_height="28dp" android:text="@string/usage_widget_loading" />
+        <TextView android:id="@+id/widget_comparison" style="@style/UsageWidgetFootnote"
+            android:layout_width="wrap_content" android:layout_marginStart="8dp"
+            android:text="@string/widget_saved_only" />
+    </LinearLayout>
+    <ImageView android:id="@+id/widget_chart" android:layout_width="match_parent"
+        android:layout_height="0dp" android:layout_weight="1"
+        android:scaleType="fitXY" android:contentDescription="@string/widget_week_chart" />
+    <TextView android:id="@+id/widget_metric" style="@style/UsageWidgetFootnote"
+        android:visibility="gone" android:text="@string/widget_metric" />
+    <TextView android:id="@+id/widget_updated" style="@style/UsageWidgetFootnote"
+        android:text="@string/widget_no_update" />
+</LinearLayout>

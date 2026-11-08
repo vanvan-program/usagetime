@@ -115,17 +115,30 @@ fun WidgetSettingsCard() {
     val manager = remember(context) { android.appwidget.AppWidgetManager.getInstance(context) }
     val colors = hindsightColors()
     HindsightCard {
-        Text("今日用时小组件", style = MaterialTheme.typography.titleSmall, color = colors.textStrong)
+        Text("桌面小组件", style = MaterialTheme.typography.titleSmall, color = colors.textStrong)
         Spacer(Modifier.height(6.dp))
         Text(
-            "显示真实记录的今日用时、前三项分类和上次补记时间。沿用当前统计口径，示例数据不进入桌面。后台更新受系统调度影响。",
+            "5种款式，按桌面空间选择。沿用当前统计口径，只显示真实已保存记录；右上角可刷新，补记新数据请打开用时记。",
             style = MaterialTheme.typography.bodySmall, color = colors.textMuted
         )
-        if (manager.isRequestPinAppWidgetSupported) {
-            TextButton(onClick = {
-                manager.requestPinAppWidget(android.content.ComponentName(context, UsageWidgetProvider::class.java), null, null)
-            }) { Text("添加到桌面") }
-        } else {
+        WidgetStyle.entries.forEachIndexed { index, style ->
+            if (index > 0) HindsightDivider()
+            Row(Modifier.fillMaxWidth().padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("${style.label}  ${style.dimensions}", style = MaterialTheme.typography.labelLarge, color = colors.textStrong)
+                    Spacer(Modifier.height(4.dp))
+                    Text(style.description, style = MaterialTheme.typography.bodySmall, color = colors.textMuted)
+                }
+                if (manager.isRequestPinAppWidgetSupported) {
+                    TextButton(onClick = {
+                        manager.requestPinAppWidget(android.content.ComponentName(context, style.provider), null, null)
+                    }) { Text("添加") }
+                }
+            }
+        }
+        Text("网格尺寸以桌面实际排列为准；拖动边缘调整后，内容会随空间变化。后台更新受系统调度影响。",
+            style = MaterialTheme.typography.labelSmall, color = colors.textMuted)
+        if (!manager.isRequestPinAppWidgetSupported) {
             Text("在桌面长按空白处，选择小组件 → 用时记。", style = MaterialTheme.typography.labelSmall, color = colors.textMuted)
         }
     }

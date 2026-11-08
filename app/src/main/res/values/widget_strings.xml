@@ -1,6 +1,21 @@
 <resources>
-    <string name="usage_widget_description">查看今日已保存用时、前三项分类和最近补记时间</string>
+    <string name="usage_widget_description">今日总用时、昨日同期、24小时走势和前三应用</string>
     <string name="usage_widget_title">今日用时</string>
     <string name="usage_widget_loading">正在读取</string>
-    <string name="usage_widget_label">用时记 · 今日用时</string>
+    <string name="usage_widget_label">用时记 · 今日概览</string>
+    <string name="widget_quick_label">用时记 · 用时速览</string>
+    <string name="widget_apps_label">用时记 · 应用排行</string>
+    <string name="widget_categories_label">用时记 · 分类分布</string>
+    <string name="widget_week_label">用时记 · 七日趋势</string>
+    <string name="widget_quick_description">紧凑显示今日已保存用时，适合2×1空间</string>
+    <string name="widget_apps_description">今日前五应用用时、占比和排行，点击进入应用详情</string>
+    <string name="widget_categories_description">今日分类占比环图、前三分类及其他分类汇总</string>
+    <string name="widget_week_description">最近七天每日用时、累计用时和已记录日均</string>
+    <string name="widget_refresh">刷新已保存统计</string>
+    <string name="widget_saved_only">仅显示本机已保存记录</string>
+    <string name="widget_metric">主要使用时间</string>
+    <string name="widget_no_update">补记 暂无</string>
+    <string name="widget_hours">今日24小时用时走势</string>
+    <string name="widget_category_chart">应用分类占比</string>
+    <string name="widget_week_chart">七日用时趋势，空心表示未记录</string>
 </resources>
