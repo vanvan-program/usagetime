@@ -1,0 +1,126 @@
+name: Validate and release Android
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+      - run: sdkmanager "platforms;android-37" "build-tools;37.0.0"
+      - name: Audit source and run regression checks
+        run: |
+          python3 tools/audit_public_tree.py
+          python3 tools/verify_dual_storage.py
+          python3 -m unittest discover -s tools -p "test_*.py"
+          sh gradlew :core:test :app:testDebugUnitTest :app:lintDebug :app:assemblePreview :app:assembleDebugAndroidTest --console=plain
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: validation-reports
+          path: |
+            core/build/reports/
+            app/build/reports/
+      - name: Android storage and widget regression
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          avd-name: usagetime-qa-regression
+          script: sh gradlew :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=dev.usagetime.app.InsightsStorageTest,dev.usagetime.app.BackupStreamReaderTest,dev.usagetime.app.BackupStreamWriterTest,dev.usagetime.app.HistoryRetentionTest --console=plain
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Restore stable signing identity
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          test -n "$KEYSTORE_BASE64" && test -n "$KEYSTORE_PASSWORD" && test -n "$KEY_ALIAS" && test -n "$KEY_PASSWORD"
+          mkdir -p "$RUNNER_TEMP/signing"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/signing/release.jks"
+      - run: sdkmanager "platforms;android-37" "build-tools;37.0.0"
+      - name: Build with stable signing identity
+        env:
+          USAGETIME_KEYSTORE_PATH: ${{ runner.temp }}/signing/release.jks
+          USAGETIME_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          USAGETIME_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          USAGETIME_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: sh gradlew :app:assemblePreview --console=plain
+      - name: Download previous official APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          previous=$(gh release list --exclude-drafts --exclude-pre-releases --json tagName --jq '.[0].tagName')
+          test -n "$previous"
+          test "$previous" != "$GITHUB_REF_NAME"
+          gh release download "$previous" --pattern '*.apk' --dir "$RUNNER_TEMP/previous"
+      - name: Verify signing and version progression
+        run: |
+          old=$(find "$RUNNER_TEMP/previous" -name '*.apk' -print -quit)
+          new=app/build/outputs/apk/preview/app-preview.apk
+          signer="$ANDROID_HOME/build-tools/37.0.0/apksigner"
+          "$signer" verify --print-certs "$old" | grep 'certificate SHA-256 digest' > "$RUNNER_TEMP/old-cert"
+          "$signer" verify --print-certs "$new" | grep 'certificate SHA-256 digest' > "$RUNNER_TEMP/new-cert"
+          diff "$RUNNER_TEMP/old-cert" "$RUNNER_TEMP/new-cert"
+          old_code=$("$ANDROID_HOME/build-tools/37.0.0/aapt" dump badging "$old" | sed -n "s/.*versionCode='\([0-9]*\)'.*/\1/p" | head -1)
+          new_code=$("$ANDROID_HOME/build-tools/37.0.0/aapt" dump badging "$new" | sed -n "s/.*versionCode='\([0-9]*\)'.*/\1/p" | head -1)
+          test "$new_code" -gt "$old_code"
+      - name: Cover-install previous version with synthetic history
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          avd-name: usagetime-qa-release
+          script: python3 tools/upgrade_check.py --serial emulator-5554 --old-apk "$(find "$RUNNER_TEMP/previous" -name '*.apk' -print -quit)" --new-apk app/build/outputs/apk/preview/app-preview.apk --output artifacts/upgrade-check.json
+      - name: Package audited source and checksums
+        run: |
+          python3 tools/release_package.py --apk app/build/outputs/apk/preview/app-preview.apk --output artifacts/release --tag "$GITHUB_REF_NAME"
+          cp artifacts/upgrade-check.json artifacts/release/
+      - name: Publish official latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" artifacts/release/* --verify-tag --title "用时记 $version" --notes-file "docs/RELEASE-$version.md" --draft
+          gh release edit "$GITHUB_REF_NAME" --draft=false --prerelease=false --latest
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: upgrade-check
+          path: artifacts/upgrade-check.json
