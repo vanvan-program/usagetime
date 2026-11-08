@@ -18,7 +18,7 @@
 | `ANDROID_KEY_ALIAS` | 对应 alias |
 | `ANDROID_KEY_PASSWORD` | 对应私钥密码 |
 
-密钥不进入 Git、源码压缩包或 Release 附件。没有配置密钥时，发布任务明确失败，不退回临时签名发布。安装包签名指纹还会与上一正式版 APK 比对。
+密钥不进入 Git、源码压缩包或 Release 附件。没有配置密钥时，校验任务照常运行，发布任务会明确跳过并提示配置 Secrets，不退回临时签名发布。安装包签名指纹还会与上一正式版 APK 比对。
 
 本地构建保留原有签名方式；也可以通过 `USAGETIME_KEYSTORE_PATH`、`USAGETIME_KEYSTORE_PASSWORD`、`USAGETIME_KEY_ALIAS`、`USAGETIME_KEY_PASSWORD` 指定 Preview 构建的稳定签名。
 
