@@ -25,6 +25,8 @@ jobs:
           distribution: temurin
           java-version: "21"
       - uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools"
       - uses: gradle/actions/setup-gradle@v4
       - run: sdkmanager "platforms;android-37" "build-tools;37.0.0"
       - name: Audit source and run regression checks
@@ -48,9 +50,30 @@ jobs:
           avd-name: usagetime-qa-regression
           script: sh gradlew :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=dev.usagetime.app.InsightsStorageTest,dev.usagetime.app.BackupStreamReaderTest,dev.usagetime.app.BackupStreamWriterTest,dev.usagetime.app.HistoryRetentionTest --console=plain
 
-  release:
+  signing:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: validate
+    runs-on: ubuntu-latest
+    outputs:
+      ready: ${{ steps.check.outputs.ready }}
+    steps:
+      - name: Check signing secrets
+        id: check
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ] && [ -n "$KEYSTORE_PASSWORD" ] && [ -n "$KEY_ALIAS" ] && [ -n "$KEY_PASSWORD" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Android signing secrets are not configured; release job will be skipped."
+          fi
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v') && needs.signing.outputs.ready == 'true'
+    needs: [validate, signing]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -63,6 +86,8 @@ jobs:
           distribution: temurin
           java-version: "21"
       - uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools"
       - uses: gradle/actions/setup-gradle@v4
       - name: Restore stable signing identity
         env:
