@@ -52,6 +52,7 @@ import androidx.compose.material.icons.outlined.ArrowDropDown
 import androidx.compose.material.icons.outlined.BarChart
 import androidx.compose.material.icons.outlined.CalendarMonth
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Computer
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.QueryStats
 import androidx.compose.material.icons.outlined.Refresh
@@ -340,6 +341,7 @@ fun UsageApp(model: UsageModel = viewModel(), widgetNavigation: WidgetNavigation
         }
     }
     BackHandler(model.selection.detail) { model.navigate(1) }
+    BackHandler(model.selection.page == 5) { model.navigate(0) }
 
     HindsightTheme(dark = dark) {
         val c = hindsightColors()
@@ -363,9 +365,17 @@ fun UsageApp(model: UsageModel = viewModel(), widgetNavigation: WidgetNavigation
 
         val s = model.selection
         val rendered = model.display
-        val navItems = listOf("总览", "应用", "对比", "分析", "设置")
-        val navPages = listOf(0, 1, 2, 4, 3)
-        val navIcons = listOf(Icons.Outlined.QueryStats, Icons.Outlined.Apps, Icons.Outlined.BarChart, Icons.Outlined.CalendarMonth, Icons.Outlined.Settings)
+        val navigation = listOf(
+            Triple(0, "总览", Icons.Outlined.QueryStats),
+            Triple(1, "应用", Icons.Outlined.Apps),
+            Triple(2, "对比", Icons.Outlined.BarChart),
+            Triple(4, "分析", Icons.Outlined.CalendarMonth),
+            Triple(5, "电脑", Icons.Outlined.Computer),
+            Triple(3, "设置", Icons.Outlined.Settings)
+        ).filter { it.first != 5 || model.showDesktopData }
+        val navPages = navigation.map { it.first }
+        val navItems = navigation.map { it.second }
+        val navIcons = navigation.map { it.third }
 
         HindsightBackdrop {
             BoxWithConstraints(
@@ -474,6 +484,7 @@ fun UsageApp(model: UsageModel = viewModel(), widgetNavigation: WidgetNavigation
                                         compressedExport.launch("用时记备份_${LocalDate.now()}.json.gz")
                                     }
                                 )
+                                s.page == 5 && model.showDesktopData -> DesktopUsageScreen()
                                 !model.permitted && !model.demo && model.display.first == null -> PermissionScreen(model) {
                                     context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
                                 }
@@ -769,7 +780,7 @@ private fun PermissionScreen(model: UsageModel, onGrant: () -> Unit) {
             Spacer(Modifier.height(18.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 HindsightBadge("无需账号")
-                HindsightBadge("无联网权限")
+                HindsightBadge("同步自愿开启")
             }
         }
         Button(
@@ -790,7 +801,7 @@ private fun PermissionScreen(model: UsageModel, onGrant: () -> Unit) {
             Text("先体验示例数据", fontWeight = FontWeight.SemiBold)
         }
         Text(
-            "无需账号 · 无联网权限 · 数据仅保存在本机",
+            "无需账号 · 默认本机保存 · 云端同步自愿开启",
             modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
             style = MaterialTheme.typography.labelSmall,
             color = c.textFaint,
@@ -1015,6 +1026,9 @@ private fun StatisticsScreen(model: UsageModel) {
                                 )
                             }
                         }
+                    }
+                    if (s.page == 0 && model.showDesktopData) {
+                        item { CompactDesktopCard(model) }
                     }
             }
         } else {
@@ -1332,7 +1346,18 @@ private fun SearchAndSortCard(model: UsageModel) {
 @Composable
 private fun CompareScreen(model: UsageModel) {
     val s = model.selection
-    val context = LocalContext.current
+    var pickingOther by remember(s.monthly) { mutableStateOf<Boolean?>(null) }
+    pickingOther?.let { other ->
+        ComparisonPeriodPicker(
+            initial = if (other) s.compareB else s.compareA,
+            monthly = s.monthly,
+            label = (if (other) "对照" else "统计") + if (s.monthly) "月" else "周",
+            onDismiss = { pickingOther = null },
+            onSelect = { date ->
+                model.change { if (other) it.copy(compareB = date) else it.copy(compareA = date) }
+            }
+        )
+    }
     val r = model.display.report
     val other = model.display.other
     val changes = remember(r?.apps, other?.apps) {
@@ -1428,7 +1453,7 @@ private fun CompareScreen(model: UsageModel) {
                         other = false,
                         modifier = Modifier.weight(1f)
                     ) {
-                        datePicker(context, s.compareA) { date -> model.change { it.copy(compareA = date) } }
+                        pickingOther = false
                     }
                     CompareDateCard(
                         label = "对照$unit",
@@ -1437,7 +1462,7 @@ private fun CompareScreen(model: UsageModel) {
                         other = true,
                         modifier = Modifier.weight(1f)
                     ) {
-                        datePicker(context, s.compareB) { date -> model.change { it.copy(compareB = date) } }
+                        pickingOther = true
                     }
                 }
                 Spacer(Modifier.height(12.dp))
@@ -1811,6 +1836,24 @@ private fun SettingsScreen(
             )
         }
 
+        SectionLabel("电脑数据")
+        HindsightCard {
+            SettingRow(
+                title = "显示电脑数据",
+                subtitle = "开启后显示并从云端拉取电脑用时",
+                trailing = {
+                    Switch(
+                        checked = model.showDesktopData,
+                        onCheckedChange = model::showDesktopData,
+                        colors = hindsightSwitchColors()
+                    )
+                }
+            )
+        }
+
+        SectionLabel("自动同步")
+        if (!model.demo) PhoneSyncSettingsCard(model.showDesktopData)
+
         SectionLabel("外观")
         HindsightCard {
             Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1832,7 +1875,7 @@ private fun SettingsScreen(
             )
             Spacer(Modifier.height(10.dp))
             Text(
-                "无账号，无联网权限。记录保存在本机；卸载会删除本地数据，请先导出备份。",
+                "记录默认保存在本机；只有启用 WebDAV 同步后才上传加密统计。卸载会删除本地数据，请先导出完整备份。",
                 style = MaterialTheme.typography.bodySmall,
                 color = c.textMuted
             )

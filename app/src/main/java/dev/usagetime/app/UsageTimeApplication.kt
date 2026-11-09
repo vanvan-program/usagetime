@@ -8,7 +8,13 @@ class UsageTimeApplication:Application(){
     val processStartedAt:Long=System.currentTimeMillis()
     val observationScope=kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob()+kotlinx.coroutines.Dispatchers.IO)
     val store by lazy{UsageStore(this)}
-    override fun onCreate(){super.onCreate();schedule(this)}
+    override fun onCreate(){
+        super.onCreate()
+        schedule(this)
+        runCatching {
+            dev.usagetime.app.sync.PhoneSyncSettings.schedule(this, dev.usagetime.app.sync.PhoneSyncSettings(this).load().enabled)
+        }
+    }
     companion object {
         fun catchUp(context:android.content.Context){
             usageWorkScheduler(context).catchUp()

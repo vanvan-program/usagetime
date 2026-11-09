@@ -7,6 +7,8 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.usagetime.app.data.Records
 import dev.usagetime.app.data.CategoryPreferences
+import dev.usagetime.app.sync.DesktopDataSettings
+import dev.usagetime.app.sync.DesktopSync
 import dev.usagetime.core.*
 import dev.usagetime.core.Period
 import kotlinx.coroutines.*
@@ -42,6 +44,9 @@ class UsageModel(application:Application,val store:dev.usagetime.app.data.UsageS
     var message by mutableStateOf<String?>(null)
     var appearance by mutableStateOf(prefs.getString("theme","system")?:"system");private set
     var showConfirmed by mutableStateOf(prefs.getBoolean("show-confirmed",false));private set
+    var showDesktopData by mutableStateOf(DesktopDataSettings.enabled(application));private set
+    var desktopRevision by mutableIntStateOf(0);private set
+    private var desktopPullJob:Job?=null
     var recording by mutableStateOf(store.recording);private set
     var now by mutableLongStateOf(wallClock());private set
     private val iconCache=object:android.util.LruCache<String,android.graphics.Bitmap>(2*1024*1024){
@@ -87,7 +92,7 @@ class UsageModel(application:Application,val store:dev.usagetime.app.data.UsageS
         // These controls only render/filter the already loaded report, even while a query is running.
         if(selection.requiresReport(previous))reload()
     }
-    fun navigate(page:Int){change{it.copy(page=page,detail=false,app=null,query="")}}
+    fun navigate(page:Int){change{it.copy(page=if(page==5&&!showDesktopData)0 else page,detail=false,app=null,query="")}}
     fun openApp(pkg:String){change{it.copy(page=1,detail=true,app=pkg,line=true,period=if(it.page==2){if(it.monthly)Period.MONTH else Period.WEEK}else it.period,anchor=if(it.page==2)it.compareA else it.anchor)}}
     fun useDemo(value:Boolean){demo=value;now=wallClock();reload()}
     fun assignCategory(pkg:String,category:AppCategory){
@@ -128,6 +133,20 @@ class UsageModel(application:Application,val store:dev.usagetime.app.data.UsageS
         }
     }
     fun theme(value:String){appearance=value;prefs.edit().putString("theme",value).apply();UsageWidgetProvider.requestUpdate(getApplication())}
+    fun showDesktopData(value:Boolean){
+        if(showDesktopData==value)return
+        DesktopDataSettings.save(getApplication(),value)
+        showDesktopData=value
+        desktopPullJob?.cancel()
+        if(!value){
+            if(selection.page==5)navigate(0)
+            return
+        }
+        desktopPullJob=viewModelScope.launch{
+            DesktopSync.pullIfStale(getApplication(),0)
+            desktopRevision++
+        }
+    }
     fun showConfirmed(value:Boolean){
         if(showConfirmed==value)return
         showConfirmed=value
@@ -184,7 +203,7 @@ class UsageModel(application:Application,val store:dev.usagetime.app.data.UsageS
     fun move(direction:Long){change{it.copy(anchor=when(it.period){Period.WEEK,Period.DAYS7->it.anchor.plusWeeks(direction);Period.MONTH->it.anchor.plusMonths(direction);Period.DAYS30->it.anchor.plusDays(30*direction);else->it.anchor.plusDays(direction)})}}
     fun reload(){
         if(!demo)categories=categoryPreferences.read()
-        if(selection.page==3||selection.page==4){reportRequests.stop();display=display.invalidateReport();return}
+        if(selection.page>=3){reportRequests.stop();display=display.invalidateReport();return}
         reportRequests.cancel()
         val isDemo=demo;val clock=if(isDemo)now else wallClock();val z=ZoneId.systemDefault();val includeConfirmed=showConfirmed
         val today=Dates.date(clock,z)
