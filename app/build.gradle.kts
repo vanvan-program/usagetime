@@ -10,8 +10,8 @@ android {
         applicationId = "dev.usagetime.app"
         minSdk = 29
         targetSdk = 36
-        versionCode = 30
-        versionName = "0.4.1"
+        versionCode = 31
+        versionName = "0.4.2"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     buildFeatures { compose = true; buildConfig = true }
