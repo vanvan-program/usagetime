@@ -139,4 +139,19 @@ class ReportExportTest {
         }
         assertEquals("暂无记录", failure.message)
     }
+
+    @Test fun csvNeutralizesControlWhitespaceAndFullWidthFormulaPrefixes() {
+        val labels = listOf(
+            "\t=1+1", "\r=1+1", "\n=1+1", "\u0000=1+1", "  =1+1",
+            "\uFEFF@SUM(A1)", "＝1+1", "＋1+1", "－1+1", "＠SUM(A1)"
+        )
+        val snapshot = ReportExportSnapshot(report(42), UsageMetric.PRIMARY, legacy = false, includeConfirmed = false)
+        for (label in labels) {
+            val csv = CsvReportFormat.build(snapshot) { label }
+            assertTrue("Unsafe label was not neutralized: $label", csv.contains("\"'$label\""))
+        }
+        val ordinary = CsvReportFormat.build(snapshot) { "  示例应用" }
+        assertTrue(ordinary.contains("\"  示例应用\""))
+        assertFalse(ordinary.contains("\"'  示例应用\""))
+    }
 }

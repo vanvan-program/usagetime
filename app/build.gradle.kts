@@ -29,11 +29,13 @@ android {
                 keyPassword = providers.environmentVariable("USAGETIME_KEY_PASSWORD").get()
             }
         }
-        create("personal") {
-            storeFile = rootProject.file(".private/usagetime.jks")
-            storePassword = providers.environmentVariable("USAGETIME_STORE_PASSWORD").orNull
-            keyAlias = "usagetime"
-            keyPassword = providers.environmentVariable("USAGETIME_STORE_PASSWORD").orNull
+        providers.environmentVariable("USAGETIME_KEYSTORE_PATH").orNull?.let { path ->
+            create("release") {
+                storeFile = file(path)
+                storePassword = providers.environmentVariable("USAGETIME_KEYSTORE_PASSWORD").get()
+                keyAlias = providers.environmentVariable("USAGETIME_KEY_ALIAS").get()
+                keyPassword = providers.environmentVariable("USAGETIME_KEY_PASSWORD").get()
+            }
         }
     }
     androidResources {
@@ -46,7 +48,7 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            signingConfig = signingConfigs.getByName("personal")
+            signingConfig = signingConfigs.findByName("release")
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
         create("preview") {

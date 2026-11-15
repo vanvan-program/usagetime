@@ -20,7 +20,7 @@
 
 密钥不进入 Git、源码压缩包或 Release 附件。没有配置密钥时，校验任务照常运行，发布任务会明确跳过并提示配置 Secrets，不退回临时签名发布。安装包签名指纹还会与上一正式版 APK 比对。
 
-本地构建保留原有签名方式；也可以通过 `USAGETIME_KEYSTORE_PATH`、`USAGETIME_KEYSTORE_PASSWORD`、`USAGETIME_KEY_ALIAS`、`USAGETIME_KEY_PASSWORD` 指定 Preview 构建的稳定签名。
+本地 Preview 默认使用开发签名，Release 默认生成未签名 APK，不依赖本机私有目录。通过 `USAGETIME_KEYSTORE_PATH`、`USAGETIME_KEYSTORE_PASSWORD`、`USAGETIME_KEY_ALIAS`、`USAGETIME_KEY_PASSWORD` 同时指定四项配置后，Preview 与 Release 均使用指定的稳定签名。环境变量值与密钥文件不得写入源码或日志。现有自动发布流程继续使用通过签名比对和覆盖升级验收的 Preview 包。
 
 ## 覆盖升级检查
 

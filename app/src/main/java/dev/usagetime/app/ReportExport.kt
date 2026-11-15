@@ -43,7 +43,14 @@ internal fun DisplayData.invalidateReport()=DisplayData(first=first,last=last)
 
 internal object CsvReportFormat {
     fun build(snapshot:ReportExportSnapshot,label:(String)->String):String{
-        fun cell(text:String)="\""+(if(text.startsWith("=")||text.startsWith("+")||text.startsWith("-")||text.startsWith("@"))"'$text" else text).replace("\"","\"\"")+"\""
+        fun cell(text:String):String{
+            val leading=text.firstOrNull()
+            val significant=text.firstOrNull{!it.isWhitespace()&&it!='\u0000'&&it!='\uFEFF'}
+            val unsafe=leading=='\t'||leading=='\r'||leading=='\n'||leading=='\u0000'||
+                significant in setOf('=','+','-','@','＝','＋','－','＠')
+            val escaped=if(unsafe)"'$text" else text
+            return "\""+escaped.replace("\"","\"\"")+"\""
+        }
         val metric=cell(snapshot.metricLabel)
         val basis=cell(snapshot.basisLabel)
         val note=cell("候选可能与未知覆盖重叠，不能相加；未闭合不计入累计；毫秒是事件记录单位")

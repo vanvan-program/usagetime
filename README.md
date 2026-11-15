@@ -59,7 +59,7 @@ sh gradlew :app:assemblePreview :core:test :app:testDebugUnitTest :app:lintDebug
 python3 tools/verify_dual_storage.py
 ```
 
-输出位于 `app/build/outputs/apk/preview/`。Preview 使用本机生成的开发签名，不保证可以覆盖其他签名的安装包。Release 构建未配置签名，发布者需自行安全配置。
+输出位于 `app/build/outputs/apk/preview/`。Preview 默认使用本机生成的开发签名，不保证可以覆盖其他签名的安装包。未提供签名配置时，`assembleRelease` 生成未签名 APK；同时提供 `USAGETIME_KEYSTORE_PATH`、`USAGETIME_KEYSTORE_PASSWORD`、`USAGETIME_KEY_ALIAS`、`USAGETIME_KEY_PASSWORD` 后，Preview 与 Release 使用指定的签名身份。正式发布必须与上一正式版签名一致，配置方式见 [发布与升级验收](docs/RELEASE-AUTOMATION.md)。
 
 ## 隐私与数据
 
