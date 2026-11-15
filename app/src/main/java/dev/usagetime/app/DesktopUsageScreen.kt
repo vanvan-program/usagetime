@@ -25,7 +25,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
-import androidx.compose.material.icons.outlined.Computer
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -33,6 +32,8 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -46,6 +47,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.graphics.toColorInt
 import dev.usagetime.app.sync.DesktopAppUse
 import dev.usagetime.app.sync.DesktopDay
 import dev.usagetime.app.sync.DesktopDevice
@@ -75,31 +77,18 @@ internal fun DesktopUsageScreen(modifier: Modifier = Modifier) {
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
     var status by remember { mutableStateOf("") }
-    var lastSuccess by remember { mutableStateOf(0L) }
-    var revision by remember { mutableStateOf(0) }
+    var lastSuccess by remember { mutableLongStateOf(0L) }
+    var revision by remember { mutableIntStateOf(0) }
     var weekTotals by remember { mutableStateOf<Map<String, Long>>(emptyMap()) }
     val enabled = remember { runCatching { PhoneSyncSettings(context).load().enabled }.getOrDefault(false) }
     val today = LocalDate.now().toString()
     val device = index.device(deviceId)
 
-    suspend fun reload() {
+    suspend fun reloadIndex() {
         val loaded = withContext(Dispatchers.IO) { DesktopSync.readIndex(context) }
         index = loaded
-        if (deviceId.isBlank()) deviceId = loaded.latest()?.id.orEmpty()
-        val selected = deviceId.ifBlank { loaded.latest()?.id.orEmpty() }
-        day = withContext(Dispatchers.IO) {
-            if (selected.isBlank()) null else DesktopSync.readDay(context, selected, date)
-        }
-        weekTotals = withContext(Dispatchers.IO) {
-            val summaries = loaded.device(selected)?.days.orEmpty()
-            (6 downTo 0).associate { offset ->
-                val value = LocalDate.parse(date).minusDays(offset.toLong()).toString()
-                value to if (summaries.containsKey(value)) {
-                    DesktopSync.readDay(context, selected, value)?.recordedMillis ?: 0L
-                } else {
-                    -1L
-                }
-            }
+        if (deviceId.isBlank() || loaded.device(deviceId) == null) {
+            deviceId = loaded.latest()?.id.orEmpty()
         }
         status = DesktopSync.status(context)
         lastSuccess = DesktopSync.lastSuccess(context)
@@ -113,26 +102,30 @@ internal fun DesktopUsageScreen(modifier: Modifier = Modifier) {
             try { DesktopSync.pull(context) }
             catch (cancelled: CancellationException) { throw cancelled }
             catch (failure: Exception) { error = failure.message ?: "无法拉取电脑用时" }
+            reloadIndex()
             revision++
-            reload()
         } finally { pulling = false }
     }
 
     LaunchedEffect(Unit) {
         loading = true
-        reload()
+        reloadIndex()
         if (enabled && System.currentTimeMillis() - lastSuccess > 10 * 60_000) pull()
     }
-    LaunchedEffect(deviceId, date, revision) {
-        if (deviceId.isNotBlank()) {
-            day = withContext(Dispatchers.IO) { DesktopSync.readDay(context, deviceId, date) }
+    LaunchedEffect(deviceId, date, revision, loading) {
+        if (loading) return@LaunchedEffect
+        val loadedIndex = index
+        val selected = deviceId
+        day = withContext(Dispatchers.IO) {
+            if (selected.isBlank()) null else DesktopSync.readDay(context, loadedIndex, selected, date)
         }
         weekTotals = withContext(Dispatchers.IO) {
-            val summaries = index.device(deviceId)?.days.orEmpty()
+            val anchorDate = LocalDate.parse(date)
+            val summaries = loadedIndex.device(selected)?.days.orEmpty()
             (6 downTo 0).associate { offset ->
-                val value = LocalDate.parse(date).minusDays(offset.toLong()).toString()
+                val value = anchorDate.minusDays(offset.toLong()).toString()
                 value to if (summaries.containsKey(value)) {
-                    DesktopSync.readDay(context, deviceId, value)?.recordedMillis ?: 0L
+                    DesktopSync.readDay(context, loadedIndex, selected, value)?.recordedMillis ?: 0L
                 } else {
                     -1L
                 }
@@ -143,9 +136,12 @@ internal fun DesktopUsageScreen(modifier: Modifier = Modifier) {
     }
 
     val summaries = device?.days.orEmpty()
-    val week = (6 downTo 0).map { offset ->
-        val value = LocalDate.parse(date).minusDays(offset.toLong()).toString()
-        value to summaries[value]
+    val week = remember(date, summaries) {
+        val anchorDate = LocalDate.parse(date)
+        (6 downTo 0).map { offset ->
+            val value = anchorDate.minusDays(offset.toLong()).toString()
+            value to summaries[value]
+        }
     }
     val maximum = maxOf(1L, weekTotals.values.maxOrNull() ?: 1L)
 
@@ -484,7 +480,7 @@ internal fun CompactDesktopCard(model: UsageModel) {
                 contentAlignment = Alignment.Center
             ) {
                 androidx.compose.material3.Icon(
-                    Icons.Outlined.Computer,
+                    AppIcons.Computer,
                     contentDescription = null,
                     tint = hindsightColors().accent,
                     modifier = Modifier.size(20.dp)
@@ -505,7 +501,7 @@ internal fun CompactDesktopCard(model: UsageModel) {
 }
 
 private fun parseColor(text: String, fallback: Color): Color =
-    runCatching { Color(android.graphics.Color.parseColor(text)) }.getOrDefault(fallback)
+    runCatching { Color(text.toColorInt()) }.getOrDefault(fallback)
 
 private fun platformLabel(value: String): String = when (value) {
     "win", "windows" -> "Windows"

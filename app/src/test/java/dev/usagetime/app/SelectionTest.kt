@@ -31,4 +31,31 @@ class SelectionTest {
             previous.copy(custom=previous.anchor.minusDays(1) to previous.anchor)
         ).forEach{assertTrue(it.copy(query="typing",line=true,nameSort=true).requiresReport(previous))}
     }
+    @Test fun monthlyFollowsPreviousMonthAndPreservesManualCompareSelection(){
+        val yesterday=java.time.LocalDate.of(2026,10,31);val today=yesterday.plusDays(1)
+        val monthlyCurrent=Selection(monthly=true,anchor=yesterday,compareA=yesterday,compareB=yesterday.minusMonths(1))
+        val rolled=monthlyCurrent.followCurrentDate(yesterday,today)
+        assertEquals(today,rolled.compareA)
+        assertEquals(today.minusMonths(1),rolled.compareB)
+        val manualCompareB=monthlyCurrent.copy(compareB=yesterday.minusMonths(3))
+        assertEquals(yesterday.minusMonths(3),manualCompareB.followCurrentDate(yesterday,today).compareB)
+    }
+    @Test fun stepAnchorAndCanStepForwardRespectPeriodBoundaries(){
+        val today=java.time.LocalDate.of(2026,11,15) // Sunday
+        val weekSelection=Selection(period=dev.usagetime.core.Period.WEEK,anchor=java.time.LocalDate.of(2026,11,9)) // Monday of same week
+        assertFalse(weekSelection.canStepForward(today))
+        val prevWeek=weekSelection.stepAnchor(-1)
+        assertEquals(java.time.LocalDate.of(2026,11,2),prevWeek.anchor)
+        assertTrue(prevWeek.canStepForward(today))
+
+        val monthSelection=Selection(period=dev.usagetime.core.Period.MONTH,anchor=today.withDayOfMonth(1))
+        assertFalse(monthSelection.canStepForward(today))
+        val prevMonth=monthSelection.stepAnchor(-1)
+        assertEquals(java.time.LocalDate.of(2026,10,1),prevMonth.anchor)
+        assertTrue(prevMonth.canStepForward(today))
+
+        assertEquals(today.minusDays(30),Selection(period=dev.usagetime.core.Period.DAYS30,anchor=today).stepAnchor(-1).anchor)
+        assertFalse(Selection(period=dev.usagetime.core.Period.ALL,anchor=today.minusDays(1)).canStepForward(today))
+        assertFalse(Selection(period=dev.usagetime.core.Period.CUSTOM,anchor=today.minusDays(1)).canStepForward(today))
+    }
 }

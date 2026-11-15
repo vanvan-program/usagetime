@@ -5,6 +5,7 @@ import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
 import android.content.Context
 import android.content.Intent
+import androidx.core.content.edit
 import android.os.Process
 import android.os.SystemClock
 import android.os.PowerManager
@@ -42,6 +43,8 @@ interface UsageDao {
     suspend fun intervals(start:Long,end:Long):List<SavedInterval>
     @Query("SELECT EXISTS(SELECT 1 FROM intervals WHERE `end`>:start AND start<:end LIMIT 1)")
     suspend fun hasIntervals(start:Long,end:Long):Boolean
+    @Query("SELECT EXISTS(SELECT 1 FROM intervals LIMIT 1)")
+    suspend fun hasAnyIntervals():Boolean
     @Query("SELECT * FROM coverage WHERE `end` > :start AND start < :end ORDER BY start")
     suspend fun coverage(start:Long,end:Long):List<SavedCoverage>
     @Query("SELECT MIN(value) FROM (SELECT MIN(start) AS value FROM coverage UNION ALL SELECT MIN(start) AS value FROM intervals)") suspend fun first():Long?
@@ -101,16 +104,38 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
     }}
     private val revision=kotlinx.coroutines.flow.MutableStateFlow(0L)
     val reportRevision:kotlinx.coroutines.flow.StateFlow<Long> get()=revision
-    // Called while holding mutex, before a writer can change or replace the database.
-    // Readers cannot repopulate until the write finishes (including rollback on failure).
-    private fun invalidateReports(){reportCache.clear();revision.value=revision.value+1}
+    // Clear memory cache under mutex before writes; bump UI revision only after the write commits.
+    private fun clearReportCache(){reportCache.clear()}
+    private fun publishReportRevision(){reportCache.clear();revision.value=revision.value+1}
     private suspend fun cachedReport(key:ReportKey,build:suspend ()->UsageReport):UsageReport=
         withContext(Dispatchers.IO){mutex.withLock{
             reportCache[key]?:build().also{currentCoroutineContext().ensureActive();reportCache.put(key,it)}
         }}
     private val preferences=context.getSharedPreferences(if(databaseName=="usage-history.db")"usage-settings"else"usage-settings-$databaseName",Context.MODE_PRIVATE)
     private val categoryPreferences=CategoryPreferences(context,if(databaseName=="usage-history.db")"usage-categories"else"usage-categories-$databaseName")
+    private val watermark by lazy{SyncWatermarkTracker.decode(preferences.getString("sync-watermark",null))}
+    @android.annotation.SuppressLint("ApplySharedPref") // Persisted on IO immediately after DB commit to avoid DB/watermark crash skew.
+    private fun persistWatermark(){preferences.edit(commit=true){putString("sync-watermark",watermark.encode())}}
+    internal fun syncWatermark():SyncWatermarkSnapshot=watermark.snapshot()
+    internal fun dirtyFrom(sinceSeq:Long):Long?=watermark.dirtyFrom(sinceSeq)
     private val names=ConcurrentHashMap<String,String>()
+    private val persistedApps=ConcurrentHashMap<String,String>()
+    private var namesLoaded=false
+    private var hasKnownSnapshot=false
+    private var knownNoLegacy:Boolean?=null
+    private var cachedHomes:Set<String>?=null
+    private var cachedHomesAt:Long=-1L
+    private fun launcherPackages():Set<String>{
+        val nowElapsed=SystemClock.elapsedRealtime()
+        val cached=cachedHomes
+        if(cached!=null&&nowElapsed-cachedHomesAt in 0 until 5*60_000L)return cached
+        val resolved=context.packageManager.queryIntentActivities(
+            Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME),0
+        ).mapTo(linkedSetOf()){it.activityInfo.packageName}.apply{add("com.android.systemui")}
+        cachedHomes=resolved
+        cachedHomesAt=nowElapsed
+        return resolved
+    }
     private var testQuery:((Long,Long,String)->Sequence<StoredEvent>)?=null
     private var testClock:(()->ClockSample)?=null
     private var collectPhaseListener:((String)->Unit)?=null
@@ -143,10 +168,10 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         val dbBytes=databaseFile.parentFile!!.listFiles().orEmpty().filter{it.isFile&&it.name.startsWith(databaseFile.name)}.sumOf{it.length()}
         return StorageInfo(dbBytes,copies.sumOf{it.file.length()},StatFs(context.filesDir.absolutePath).availableBytes,copies.size,copies.firstOrNull()?.time,recovery.hasRollback(),recoveryIssue?.let{"恢复尚未完成，原文件已保留：$it"}?:preferences.getString("safety-warning",null),copies.map{it.time},preferences.getLong("last-full-export",0).takeIf{it>0})
     }
-    fun noteFullExport(){preferences.edit().putLong("last-full-export",System.currentTimeMillis()).apply()}
+    fun noteFullExport(){preferences.edit { putLong("last-full-export",System.currentTimeMillis()) }}
     private fun ensureWriteSpace(){
         if(StatFs(context.filesDir.absolutePath).availableBytes<LocalRecovery.RESERVE){
-            preferences.edit().putBoolean("interrupted",true).apply()
+            preferences.edit { putBoolean("interrupted",true) }
             throw java.io.IOException("存储空间不足64MB，已暂停新写入；已有记录保留，请释放空间并导出备份")
         }
     }
@@ -157,7 +182,7 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
     }
     private suspend fun snapshotInsideLock(force:Boolean):LocalRecovery.Snapshot?{
         val now=SystemClock.elapsedRealtime();val boot=Settings.Global.getInt(context.contentResolver,Settings.Global.BOOT_COUNT,-1)
-        if(!force&&recovery.list().isNotEmpty()&&preferences.getInt("safety-boot",-2)==boot&&now-preferences.getLong("safety-elapsed",-1) in 0 until 12*3_600_000L)return null
+        if(!force&&preferences.getInt("safety-boot",-2)==boot&&now-preferences.getLong("safety-elapsed",-1) in 0 until 12*3_600_000L&&(hasKnownSnapshot||recovery.list().isNotEmpty().also{if(it)hasKnownSnapshot=true}))return null
         ensureWriteSpace()
         // A checkpoint is required; never copy a bare DB while committed data remains only in WAL.
         database.openHelper.readableDatabase.query("PRAGMA quick_check(1)").use{c->require(c.moveToFirst()&&c.getString(0)=="ok"){"数据库完整性异常，已保留旧安全副本"}}
@@ -166,17 +191,21 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
             require(File(databaseFile.path+"-wal").length()==0L){"数据库日志尚未合并，未创建不完整副本"}
             val task=currentCoroutineContext()
             val result=recovery.create{task.ensureActive()}
-            preferences.edit().putInt("safety-boot",boot).putLong("safety-elapsed",now).remove("safety-warning").apply()
+            hasKnownSnapshot=true
+            preferences.edit { putInt("safety-boot",boot).putLong("safety-elapsed",now).remove("safety-warning") }
             result
         }finally{database=openDatabase(databaseFile.name)}
     }
     private suspend fun archiveBeforeCleanup(now:Long,zone:ZoneId){
+        val state=dualHistory.state()
+        // Never rebuild pre-floor summaries under another timezone after compaction deleted raw detail.
+        if(state!=null&&state.zone!=zone.id)return
         val progress=DualCodec.decodeProgress(dual.replayMetadata())
         if(!progress.initialized||progress.dirtyFrom!=null)return
         val latest=dual.latest()?:return
         val cutoff=minOf(HistoryRetention.cutoff(now,zone),Dates.midnight(Dates.date(latest.time,zone),zone))
         val first=listOfNotNull<Long>(dualHistory.first(),dual.first(),dual.firstEvent()).minOrNull()?.let{Dates.midnight(Dates.date(it,zone),zone)}?:return
-        var day=first
+        var day=maxOf(first,state?.floor?:first)
         while(day<cutoff){
             currentCoroutineContext().ensureActive()
             for(metric in UsageMetric.entries){
@@ -212,9 +241,9 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
                     dual.trimDiagnostics(listOf("STATE_RESET","RETENTION_GAP","BOOT_CHANGED","WALL_CLOCK_BACKWARD","WALL_CLOCK_DISCONTINUITY","PERMISSION_INTERRUPTION","PERMISSION_DENIED","SYNC_DELAY","EMPTY_SYSTEM_QUERY","HISTORY_REBUILT","BACKUP_IMPORTED","SYNC_COMMITTED","RECOVERY_SNAPSHOT"))
                 }
             },
-            recordMaintenance={s->preferences.edit().putLong("maintenance-elapsed",s.elapsed).putInt("maintenance-boot",s.boot).apply()},
+            recordMaintenance={s->preferences.edit { putLong("maintenance-elapsed",s.elapsed).putInt("maintenance-boot",s.boot) }},
             snapshot={snapshotInsideLock(force);Unit},
-            warning={e->preferences.edit().putString("safety-warning","安全副本尚未更新：${e.message}").apply()}
+            warning={e->preferences.edit { putString("safety-warning","安全副本尚未更新：${e.message}") }}
         )
     }
     suspend fun createSafetyCopy():String=withContext(Dispatchers.IO){mutex.withLock{snapshotInsideLock(true);"已创建并校验本机安全副本"}}
@@ -238,7 +267,7 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
     suspend fun restoreSafetyCopy(undo:Boolean=false,snapshotTime:Long?=null):String=withContext(Dispatchers.IO){mutex.withLock{
         ensureWriteSpace()
         // Readers and writers share this mutex, so no Room operation uses a closed connection.
-        invalidateReports()
+        clearReportCache()
         database.close()
         try{
             if(recoveryIssue!=null){recovery.recoverInterrupted();recoveryIssue=null}
@@ -249,21 +278,34 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
             }
             if(missingGuard.exists()){require(missingGuard.delete()){ "无法解除数据库缺失保护" };syncFolder(databaseFile.parentFile!!)}
             names.clear()
+            persistedApps.clear()
+            namesLoaded=false
+            hasKnownSnapshot=false
+            knownNoLegacy=null
         }finally{database=openDatabase(databaseFile.name)}
         database.withTransaction{dual.latest()?.let{saved->dual.events(listOf(DualCodec.event(saved.time,Signal.GAP,source=EvidenceSource.OWN_WINDOW,zone=ZoneId.systemDefault().id)));markReplayDirty(saved.time)}}
+        watermark.recordFull()
+        watermark.bumpLabels()
+        persistWatermark()
+        publishReportRevision()
         "已恢复安全副本；恢复前数据库已保留，校验正常时可以撤销"
     }}
     suspend fun close()=withContext(Dispatchers.IO){mutex.withLock{database.close()}}
     var recording:Boolean
         get()=preferences.getBoolean("recording",true)
-        set(value){preferences.edit().putBoolean("recording",value).apply()}
+        set(value){preferences.edit { putBoolean("recording",value) }}
     fun permitted():Boolean {
         val ops=context.getSystemService(AppOpsManager::class.java)
         return ops.checkOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS,Process.myUid(),context.packageName)==AppOpsManager.MODE_ALLOWED
     }
     suspend fun first():Long?=withContext(Dispatchers.IO){mutex.withLock{listOfNotNull<Long>(dao.first(),dual.first(),dualHistory.first()).minOrNull()}}
     suspend fun last():Long?=withContext(Dispatchers.IO){mutex.withLock{dual.latest()?.time?:dao.cursor()?.time}}
-    suspend fun hasLegacy(window:Window):Boolean=withContext(Dispatchers.IO){mutex.withLock{dao.hasIntervals(window.start,window.end)}}
+    private val attributedEvidence=java.util.EnumSet.of(Evidence.CONFIRMED,Evidence.INFERRED)
+    suspend fun hasLegacy(window:Window):Boolean=withContext(Dispatchers.IO){mutex.withLock{
+        if(knownNoLegacy==true)false
+        else if(!dao.hasAnyIntervals()){knownNoLegacy=true;false}
+        else{knownNoLegacy=false;dao.hasIntervals(window.start,window.end)}
+    }}
     suspend fun readLegacy(window:Window):Records=withContext(Dispatchers.IO){mutex.withLock{database.withTransaction{
         Records(dao.intervals(window.start,window.end).map{Interval(it.app,it.start,it.end)},dao.coverage(window.start,window.end).map{Coverage(it.start,it.end,it.reliable)})
     }}}
@@ -273,7 +315,7 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         val values=if(first!=null&&last!=null&&window.start>=first+(last-first)/2)
             dual.recentSlices(window.start,window.end,metric.name)else dual.slices(window.start,window.end,metric.name)
         val observations=DualCodec.effective(values)
-        return Records(observations.filter{it.app!=null&&it.evidence in setOf(Evidence.CONFIRMED,Evidence.INFERRED)}.map{Interval(it.app!!,it.start,it.end)},observations.filter{it.evidence==Evidence.CONFIRMED&&!it.provisional}.map{Coverage(it.start,it.end,true)},observations)
+        return Records(observations.filter{it.app!=null&&it.evidence in attributedEvidence}.map{Interval(it.app!!,it.start,it.end)},observations.filter{it.evidence==Evidence.CONFIRMED&&!it.provisional}.map{Coverage(it.start,it.end,true)},observations)
     }
     suspend fun read(window:Window,metric:UsageMetric=UsageMetric.PRIMARY):Records=withContext(Dispatchers.IO){mutex.withLock{database.withTransaction{readInsideTransaction(window,metric)}}}
     private suspend fun calculateDay(window:Window,metric:UsageMetric):List<MetricDayCell>{
@@ -433,7 +475,7 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
             }){
                 compact.forEach{day->accumulator.addDayTotals(Window(day.dayStart,day.dayEnd),
                     day.value,day.unknown,day.provisional,day.observed,day.positive!=0)}
-                dual.dailyAppTotals(from,until,zone.id,metric.name).forEach{row->
+                dual.dailyAppTotals(from,until,zone.id,metric.name,app).forEach{row->
                     accumulator.addAppTotals(row.app,row.confirmed,row.inferred,row.provisional)
                 }
             }else{
@@ -487,7 +529,14 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
     fun label(pkg:String):String=names.getOrPut(pkg){
         runCatching{context.packageManager.getApplicationLabel(context.packageManager.getApplicationInfo(pkg,0)).toString()}.getOrDefault(pkg.substringAfterLast('.'))
     }
-    suspend fun loadNames()=withContext(Dispatchers.IO){mutex.withLock{dao.apps().forEach{names[it.app]=it.label}}}
+    private suspend fun ensureNamesLoadedInsideLock(){
+        if(!namesLoaded){
+            dao.apps().forEach{names.putIfAbsent(it.app,it.label);persistedApps[it.app]=it.label}
+            namesLoaded=true
+        }
+    }
+    suspend fun loadNames()=withContext(Dispatchers.IO){mutex.withLock{dao.apps().forEach{names[it.app]=it.label;persistedApps[it.app]=it.label};namesLoaded=true}}
+    suspend fun ensureNamesLoaded()=withContext(Dispatchers.IO){mutex.withLock{ensureNamesLoadedInsideLock()}}
     fun cachedLabel(pkg:String)=names[pkg]
     suspend fun warmLabel(pkg:String)=withContext(Dispatchers.IO){label(pkg)}
     private fun platformEvents(from:Long,until:Long,zone:String):Sequence<StoredEvent>{
@@ -527,7 +576,7 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
             else database.withTransaction{saveEvidenceRevision()}
         }
         if(!permitted()){
-            preferences.edit().putBoolean("interrupted",true).apply()
+            preferences.edit { putBoolean("interrupted",true) }
             log(System.currentTimeMillis(),"PERMISSION_DENIED","Usage access unavailable; continuity not assumed")
             // Pending local evidence does not need platform access; finish it even without permission.
             processPendingInsideLock()
@@ -548,10 +597,10 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         }
         val interrupted=preferences.getBoolean("interrupted",false)
         val queryStart=maxOf(0,if(latest==null)now-7*day else maxOf(latest.time-2*day,now-7*day))
-        val homes=context.packageManager.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME),0).map{it.activityInfo.packageName}.toSet()+"com.android.systemui"
+        val homes=launcherPackages()
         var queryMs=0L
         val timings=SyncTimings()
-        invalidateReports()
+        clearReportCache()
         var rawCount=0L;var hasLifecycle=false;var earliestNew:Long?=null
         val observedApps=linkedSetOf<String>()
         try{
@@ -595,22 +644,38 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
             throw SyncUnavailable("系统事件查询失败：${e.message?:e.javaClass.simpleName}")
         }
         collectPhaseListener?.invoke("raw-saved")
-        try{
+        var toPersist=emptyList<SavedApp>()
+        if(observedApps.isNotEmpty()){
+            ensureNamesLoadedInsideLock()
+            toPersist=observedApps.mapNotNull{pkg->
+                val resolved=label(pkg)
+                if(persistedApps[pkg]!=resolved)SavedApp(pkg,resolved)else null
+            }
+        }
+        val modifiedFrom=try{
             // Phase B: replay saved evidence and rebuild layered summaries; failure leaves raw events saved for local retry.
             database.withTransaction {
             val progress=DualCodec.decodeProgress(dual.replayMetadata())
             val requestedStart=progress.start(latest?.time,queryStart,earliestNew)
-            dao.apps(observedApps.map{SavedApp(it,label(it))})
-            recomputeInsideTransaction(now,elapsed,boot,zone,requestedStart,queryStart,homes,timings,sample.uncertainty)
+            if(toPersist.isNotEmpty())dao.apps(toPersist)
+            val earliestTouched=recomputeInsideTransaction(now,elapsed,boot,zone,requestedStart,queryStart,homes,timings,sample.uncertainty)
             log(now,"SYNC_COMMITTED","query=$queryStart..$now; raw=$rawCount; replay=${timings.replayStart}; incremental=${progress.initialized}; algorithm=${DualUsageEngine.VERSION}; zone=${zone.id}")
+            earliestTouched
         }
         }catch(e:kotlinx.coroutines.CancellationException){throw e}
         catch(e:Exception){
             log(now,"REPLAY_PENDING","Raw events saved; statistics retry pending: ${e.message?.take(200)?:e.javaClass.simpleName}")
             throw SyncUnavailable("原始事件已保存，统计将在下次补记时继续：${e.message?:e.javaClass.simpleName}")
         }
+        if(toPersist.isNotEmpty()){
+            toPersist.forEach{persistedApps[it.app]=it.label}
+            watermark.bumpLabels()
+        }
+        watermark.recordIncremental(modifiedFrom)
+        persistWatermark()
+        publishReportRevision()
         collectPhaseListener?.invoke("committed")
-        preferences.edit().putBoolean("interrupted",false).apply()
+        if(interrupted)preferences.edit { putBoolean("interrupted",false) }
         val safetyStarted=SystemClock.elapsedRealtime()
         maintainAndSnapshot()
         if(dev.usagetime.app.BuildConfig.DEBUG)android.util.Log.i("UsageTimeSync","complete total_ms=${SystemClock.elapsedRealtime()-requestedAt} wait_ms=${acquiredAt-requestedAt} query_ms=$queryMs replay_ms=${timings.replayMs} summary_ms=${timings.summaryMs} safety_ms=${SystemClock.elapsedRealtime()-safetyStarted} replay_span_ms=${timings.replaySpan}")
@@ -618,7 +683,7 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
     }}
     private class SyncTimings{var replayMs=0L;var summaryMs=0L;var replaySpan=0L;var replayStart=0L}
     /** Replay saved evidence from requestedStart and rebuild hour/day/month summaries inside the caller's transaction. */
-    private suspend fun recomputeInsideTransaction(now:Long,elapsed:Long,boot:String,zone:ZoneId,requestedStart:Long,cutCandidate:Long,homes:Set<String>,timings:SyncTimings,clockUncertainty:Long=0){
+    private suspend fun recomputeInsideTransaction(now:Long,elapsed:Long,boot:String,zone:ZoneId,requestedStart:Long,cutCandidate:Long,homes:Set<String>,timings:SyncTimings,clockUncertainty:Long=0):Long{
         val previousEnd=dual.latest()?.time
         require(previousEnd==null||now>=previousEnd){"重放终点不能早于已处理边界"}
         val anchor=dual.checkpoint(requestedStart)
@@ -636,6 +701,7 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         collectPhaseListener?.invoke("stats")
         var at=start
         var state=initial
+        var earliestClosure:Long?=null
         // Bound live event/interval objects to one civil day; keep the commit atomic.
         while(at<now){
             currentCoroutineContext().ensureActive();ensureWriteSpace()
@@ -643,7 +709,7 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
             val next=minOf(now,midnight,at+6*3_600_000L,if(at<cut)cut else now)
             val result=DualUsageEngine.parse(dual.events(at,next).map{it.event()},Window(at,next),state,homes)
             result.slices.chunked(1000).forEach{batch->dual.slices(batch.map{DualCodec.stored(it)})}
-            applyClosures(result.closures)
+            applyClosures(result.closures)?.let{earliestClosure=minOf(earliestClosure?:it,it)}
             state=result.checkpoint
             dual.checkpoint(SyncCheckpoint(next,DualCodec.encode(state),next,if(next==now)elapsed else -1,boot,zone.id))
             collectPhaseListener?.invoke("stats-written")
@@ -652,9 +718,10 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         }
         timings.replayMs=SystemClock.elapsedRealtime()-replayStarted
         val summariesStarted=SystemClock.elapsedRealtime()
+        val hourStart=java.time.Instant.ofEpochMilli(start).atZone(zone).withMinute(0).withSecond(0).withNano(0).toInstant().toEpochMilli()
         val dayStart=Dates.midnight(Dates.date(start,zone),zone)
         val monthStart=Dates.midnight(Dates.date(start,zone).withDayOfMonth(1),zone)
-        dual.deleteHoursFrom(start);dual.deleteMonthsFrom(monthStart);dual.deleteDaysFrom(dayStart)
+        dual.deleteHoursFrom(hourStart);dual.deleteMonthsFrom(monthStart);dual.deleteDaysFrom(dayStart)
         // One slice read per day and metric; hour cells merge into the day row they belong to.
         val hourCacheFloor=now-90*86_400_000L
         val dayBudget=CacheBudget(500000).apply{rows=dual.dailyCount();floor=dual.cacheFirst(zone.id)}
@@ -663,7 +730,7 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
             for(metric in UsageMetric.entries){
                 currentCoroutineContext().ensureActive()
                 val data=readInsideTransaction(daySlot,metric)
-                val hourCells=Reports.slots(daySlot,zone,Grain.HOUR).filter{it.end>start&&it.end>hourCacheFloor}.map{h->h to DailyMetrics.cells(data.slices,metric,h)}
+                val hourCells=Reports.slots(daySlot,zone,Grain.HOUR).filter{it.end>hourStart&&it.end>hourCacheFloor}.map{h->h to DailyMetrics.cells(data.slices,metric,h)}
                 // Partial tail hours keep their actual bounds; very old spans stay slice-computed to bound write amplification.
                 dual.hourly(hourCells.flatMap{(_,c)->hourRows(c,metric,zone)})
                 val cells=DailyMetrics.cells(data.slices,metric,daySlot)
@@ -684,6 +751,7 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         timings.summaryMs=SystemClock.elapsedRealtime()-summariesStarted
         finishReplay(now)
         dual.checkpoint(SyncCheckpoint(-4,DualCodec.encodeClock(ClockSample(now,elapsed,boot,clockUncertainty)),0,-1,"","",0))
+        return minOf(start,earliestClosure?:start)
     }
     /** Recompute evidence already saved locally; never contacts the platform, so permission loss cannot stall it. */
     private suspend fun processPendingInsideLock():String{
@@ -699,11 +767,14 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         // A reboot or time jump at retry time cannot extend this historical, already acquired range.
         val diagnosis=ClockDiagnosis.inspect(ClockSample(boundary.end,boundary.elapsed,boundary.boot,boundary.uncertainty),sample)
         if(diagnosis!=null)log(sample.wall,diagnosis,"Local replay limited to saved acquisition end=${boundary.end}")
-        val homes=context.packageManager.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME),0).map{it.activityInfo.packageName}.toSet()+"com.android.systemui"
-        invalidateReports()
+        val homes=launcherPackages()
+        clearReportCache()
         val timings=SyncTimings()
         try{
-            database.withTransaction{recomputeInsideTransaction(boundary.end,boundary.elapsed,boundary.boot,zone,plan.start,boundary.start,homes,timings,boundary.uncertainty)}
+            val modifiedFrom=database.withTransaction{recomputeInsideTransaction(boundary.end,boundary.elapsed,boundary.boot,zone,plan.start,boundary.start,homes,timings,boundary.uncertainty)}
+            watermark.recordIncremental(modifiedFrom)
+            persistWatermark()
+            publishReportRevision()
             log(sample.wall,"LOCAL_REPLAY_COMMITTED","local-only replay=${timings.replayStart}..${boundary.end}")
             return "已根据本地事件更新统计"
         }catch(e:kotlinx.coroutines.CancellationException){throw e}
@@ -712,8 +783,8 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
             throw SyncUnavailable("原始事件已保存，统计将在下次补记时继续：${e.message?:e.javaClass.simpleName}")
         }
     }
-    private suspend fun applyClosures(values:List<ClosedEvidence>){
-        if(values.isEmpty())return
+    private suspend fun applyClosures(values:List<ClosedEvidence>):Long?{
+        if(values.isEmpty())return null
         val pending=PendingClosures(values)
         // One bounded cursor scan replaces a MIN(refs LIKE ...) query for every closed session.
         database.openHelper.readableDatabase.query("SELECT metric,app,start,refs,reason FROM usage_intervals WHERE algorithm=2 AND provisional=1 AND app IS NOT NULL").use{cursor->
@@ -734,6 +805,7 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
             dual.deleteDaysFrom(it);dual.deleteHoursFrom(it);dual.deleteMonthsFrom(it)
             HistoryRetention.invalidate(database,it)
         }
+        return invalidate
     }
     /** Bounded-memory replay of saved evidence; never asks the platform to recover years-old events. */
     private suspend fun saveEvidenceRevision(){
@@ -741,14 +813,15 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
     }
     suspend fun rebuildHistory():String=withContext(Dispatchers.IO){mutex.withLock{rebuildHistoryInsideLock()}}
     private suspend fun rebuildHistoryInsideLock():String{
-        ensureWriteSpace();invalidateReports();snapshotInsideLock(true)
-        return database.withTransaction{
+        ensureWriteSpace();clearReportCache();snapshotInsideLock(true)
+        var rebuilt=false
+        val message=database.withTransaction{
         val floor=dualHistory.state()?.floor
         val first=floor?:dual.firstEvent()?:return@withTransaction "尚无已保存原始事件"
         val last=dual.latest()?:return@withTransaction "尚无同步检查点"
         val seed=if(floor!=null)dual.checkpoint(floor)?.takeIf{it.time==floor}?.let{DualCodec.decode(it.state)}?:error("缺少压缩边界检查点")else EngineState()
         val end=last.time;var at=first;var state=seed;val step=6*3_600_000L
-        val homes=context.packageManager.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME),0).map{it.activityInfo.packageName}.toSet()+"com.android.systemui"
+        val homes=launcherPackages()
         HistoryRetention.invalidate(database,first)
         dual.deleteRecent(first);dual.deleteCheckpointsAfter(first);dual.deleteDaysFrom(first);dual.deleteHoursFrom(first);dual.deleteMonthsFrom(first)
         dual.checkpoint(SyncCheckpoint(first,DualCodec.encode(seed),first,-1,last.boot,last.zone))
@@ -764,8 +837,16 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         finishReplay(end)
         saveEvidenceRevision()
         log(System.currentTimeMillis(),"HISTORY_REBUILT","Saved event replay $first..$end; v1/imported history retained; algorithm=2")
+        rebuilt=true
         "已根据保存的原始事件重算历史"
-    }}
+    }
+        if(rebuilt){
+            watermark.recordFull()
+            persistWatermark()
+            publishReportRevision()
+        }
+        return message
+    }
     suspend fun writeCompressedBackup(output:java.io.OutputStream)=withContext(Dispatchers.IO){
         java.util.zip.GZIPOutputStream(output,65536).use{writeBackup(it)}
     }
@@ -775,7 +856,7 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         BackupStreamWriter.write(output,categoryPreferences.read()){database.openHelper.readableDatabase.query(it)}
     }}}
     suspend fun importBackup(input:java.io.InputStream):Long=withContext(Dispatchers.IO){mutex.withLock{
-        ensureWriteSpace();invalidateReports();snapshotInsideLock(true)
+        ensureWriteSpace();clearReportCache();snapshotInsideLock(true)
         val importedCategories=linkedMapOf<String,AppCategory>()
         val importedTotal=database.withTransaction{
         var imported=0L;var importedDetailStart:Long?=null
@@ -842,9 +923,17 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         HistoryRetention.mergeImport(database)
         raw.execSQL("DELETE FROM incoming_days");raw.execSQL("DELETE FROM incoming_seals")
         dual.deleteDaysFrom(0);dual.deleteHoursFrom(0);dual.deleteMonthsFrom(0)
+        names.clear()
+        persistedApps.clear()
+        namesLoaded=false
+        knownNoLegacy=null
         log(System.currentTimeMillis(),"BACKUP_IMPORTED","$imported records; imported evidence cannot become locally confirmed; live checkpoints retained")
         imported
         }
+        watermark.recordFull()
+        watermark.bumpLabels()
+        persistWatermark()
+        publishReportRevision()
         maintainAndSnapshot(true)
         categoryPreferences.merge(importedCategories)
         importedTotal

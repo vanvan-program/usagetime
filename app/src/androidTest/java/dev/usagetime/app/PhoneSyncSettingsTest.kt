@@ -43,4 +43,12 @@ class PhoneSyncSettingsTest {
         assertFalse(settings.load().enabled)
         assertFalse(File(context.filesDir, "phone-sync.settings").exists())
     }
+    @Test fun corruptSettingsFileThrowsReadableConfigurationError() {
+        val context = isolated()
+        File(context.filesDir, "phone-sync.settings").writeBytes(byteArrayOf(1, 2, 3))
+        val error = assertThrows(dev.usagetime.app.sync.InvalidSyncSettingsException::class.java) {
+            PhoneSyncSettings(context).load()
+        }
+        assertTrue(error.message!!.contains("无法读取同步配置"))
+    }
 }

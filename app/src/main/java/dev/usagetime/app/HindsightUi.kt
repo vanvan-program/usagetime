@@ -25,7 +25,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
-import androidx.compose.material.icons.outlined.Schedule
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -276,7 +277,7 @@ fun BrandMark(size: Dp = 36.dp) {
         contentAlignment = Alignment.Center
     ) {
         Icon(
-            Icons.Outlined.Schedule,
+            AppIcons.Schedule,
             contentDescription = null,
             tint = Color.White,
             modifier = Modifier.size(size * 0.55f)
@@ -456,6 +457,27 @@ fun HindsightChip(
             maxLines = 1
         )
     }
+}
+
+@Composable
+fun HindsightPillChip(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    val c = hindsightColors()
+    FilterChip(
+        selected = selected,
+        onClick = onClick,
+        label = { Text(label) },
+        shape = CircleShape,
+        colors = FilterChipDefaults.filterChipColors(
+            containerColor = c.control,
+            labelColor = c.textMuted,
+            selectedContainerColor = c.accent,
+            selectedLabelColor = Color.White
+        )
+    )
 }
 
 @Composable
@@ -685,7 +707,6 @@ fun RankingMeta(
 
 @Composable
 fun AppIconTile(model: UsageModel, pkg: String, size: Dp = 40.dp) {
-    val label = model.label(pkg)
     var image by androidx.compose.runtime.remember(pkg) { androidx.compose.runtime.mutableStateOf(model.cachedIcon(pkg)) }
     androidx.compose.runtime.LaunchedEffect(pkg) {
         if (image == null) image = model.loadIcon(pkg)
@@ -700,6 +721,7 @@ fun AppIconTile(model: UsageModel, pkg: String, size: Dp = 40.dp) {
                 .clip(RoundedCornerShape(size * 0.25f))
         )
     } else {
+        val label = model.label(pkg)
         Box(
             Modifier
                 .size(size)

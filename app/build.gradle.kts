@@ -10,12 +10,12 @@ android {
         applicationId = "dev.usagetime.app"
         minSdk = 29
         targetSdk = 36
-        versionCode = 31
-        versionName = "0.4.2"
+        versionCode = 32
+        versionName = "0.4.3"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     buildFeatures { compose = true; buildConfig = true }
-    sourceSets.getByName("androidTest").assets.srcDir("$projectDir/schemas")
+    sourceSets.getByName("androidTest").assets.directories.add("$projectDir/schemas")
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -36,8 +36,19 @@ android {
             keyPassword = providers.environmentVariable("USAGETIME_STORE_PASSWORD").orNull
         }
     }
+    androidResources {
+        localeFilters += listOf("zh-rCN", "zh-rHK", "zh-rTW", "en")
+    }
+    packaging {
+        resources.excludes += listOf("/META-INF/{AL2.0,LGPL2.1}", "META-INF/**/LICENSE.txt")
+    }
     buildTypes {
-        release { isMinifyEnabled = false; signingConfig = signingConfigs.getByName("personal") }
+        release {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            signingConfig = signingConfigs.getByName("personal")
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
         create("preview") {
             initWith(getByName("debug"))
             isMinifyEnabled = true
@@ -54,7 +65,7 @@ dependencies {
     implementation(platform("androidx.compose:compose-bom:2026.03.00"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.material3:material3")
-    implementation("androidx.compose.material:material-icons-extended")
+    implementation("androidx.compose.material:material-icons-core")
     implementation("androidx.activity:activity-compose:1.12.4")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.10.0")

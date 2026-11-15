@@ -1,6 +1,7 @@
 package dev.usagetime.core
 
 import java.time.ZoneId
+import java.util.EnumSet
 import kotlin.math.abs
 
 enum class UsageMetric(val label:String){PRIMARY("主要使用时间"),VISIBLE("屏幕可见时间")}
@@ -40,6 +41,26 @@ object ClockDiagnosis {
 object DualUsageEngine {
     const val VERSION=3
     const val PROOF_PREFIX="proof:"
+    private val RESET_SIGNALS=EnumSet.of(Signal.SHUTDOWN,Signal.STARTUP,Signal.GAP,Signal.CLOCK_UNCERTAIN,Signal.CLOCK_TRUSTED)
+    private val FOCUS_SIGNALS=EnumSet.of(Signal.FOCUS_GAIN,Signal.FOCUS_LOSS)
+    private val LIFECYCLE_SIGNALS=EnumSet.of(Signal.RESUME,Signal.PAUSE,Signal.STOP)
+    private val FOCUS_END_SIGNALS=EnumSet.of(Signal.FOCUS_LOSS,Signal.PAUSE,Signal.STOP)
+    private val PAUSE_OR_STOP_SIGNALS=EnumSet.of(Signal.PAUSE,Signal.STOP)
+    private val SCREEN_SIGNALS=EnumSet.of(Signal.SCREEN_ON,Signal.SCREEN_OFF,Signal.NON_INTERACTIVE)
+    private val LOCK_SIGNALS=EnumSet.of(Signal.LOCK,Signal.UNLOCK)
+    private val INTERACTIVE_CHANGE_SIGNALS=EnumSet.of(Signal.SCREEN_ON,Signal.NON_INTERACTIVE)
+    private val LOCK_OR_OFF_SIGNALS=EnumSet.of(Signal.SCREEN_OFF,Signal.NON_INTERACTIVE,Signal.LOCK)
+    private val SNAPSHOT_SIGNALS=EnumSet.of(Signal.FOCUS_LOSS,Signal.PAUSE,Signal.STOP,Signal.SCREEN_OFF,Signal.NON_INTERACTIVE,Signal.LOCK)
+    private val TRUSTED_FOCUS_SOURCES=EnumSet.of(EvidenceSource.OWN_WINDOW,EvidenceSource.TEST)
+    private fun hasAtMostOneKind(group:List<ObservedEvent>,target:EnumSet<Signal>):Boolean{
+        var seen:Signal?=null
+        for(item in group){
+            if(item.signal in target){
+                if(seen==null)seen=item.signal else if(seen!=item.signal)return false
+            }
+        }
+        return true
+    }
     val transitionTable:Map<Signal,String> = mapOf(
         Signal.RESUME to "set matching identity RESUMED; preserve all other identities",
         Signal.PAUSE to "matching identity PAUSED; retain visible candidate, remove focus",
@@ -109,9 +130,9 @@ object DualUsageEngine {
             }
         }
         for((time,batch) in events.groupBy{it.time}){
-            val reset=batch.any{it.signal in setOf(Signal.SHUTDOWN,Signal.STARTUP,Signal.GAP,Signal.CLOCK_UNCERTAIN,Signal.CLOCK_TRUSTED)}
-            boundaryRefs=batch.map{it.id}.toSet();emit(time,reset);at=time
-            refs=batch.map{it.id}.toSet()
+            val reset=batch.any{it.signal in RESET_SIGNALS}
+            boundaryRefs=batch.mapTo(HashSet(batch.size)){it.id};emit(time,reset);at=time
+            refs=boundaryRefs
             if(reset){
                 nodes.forEach{(key,node)->UsageMetric.entries.forEach{m->closures+=ClosedEvidence(m,node.app,node.origin,time,Evidence.UNKNOWN,false,batch.first().id);focusRefs[key]?.let{closures+=ClosedEvidence(m,node.app,it,time,Evidence.UNKNOWN,true,batch.first().id)}}}
                 nodes.clear();focuses.clear();focusRefs.clear();deniedFocus.clear();screenRef=null;lockRef=null;displayOff=false;screen=Knowledge.UNKNOWN;locked=Knowledge.UNKNOWN
@@ -139,30 +160,33 @@ object DualUsageEngine {
                 return if(hasYes)Knowledge.YES else if(hasNo)Knowledge.NO else current
             }
             // Close only from matching observed boundaries, never from disappearance after a reset.
-            val nodesBefore=nodes.toMap()
-            val focusBefore=focusRefs.toMap()
-            batch.groupBy{it.key}.forEach{(key,group)->
-                if(group.map{it.signal}.filter{it in setOf(Signal.FOCUS_GAIN,Signal.FOCUS_LOSS)}.toSet().size<=1&&group.map{it.signal}.filter{it in setOf(Signal.RESUME,Signal.PAUSE,Signal.STOP)}.toSet().size<=1){
-                    if(group.any{it.signal in setOf(Signal.FOCUS_LOSS,Signal.PAUSE,Signal.STOP)})focusBefore[key]?.let{ref->UsageMetric.entries.forEach{m->focusEnds.getOrPut(m){mutableSetOf()}.add(ref);nodesBefore[key]?.let{n->closures+=ClosedEvidence(m,n.app,ref,time,Evidence.CONFIRMED,true,group.first().id)}}}
-                    nodesBefore[key]?.let{n->
-                        val grade=if(n.stage==ActivityStage.UNKNOWN)Evidence.UNKNOWN else Evidence.INFERRED
-                        if(group.any{it.signal==Signal.PAUSE||it.signal==Signal.STOP})closures+=ClosedEvidence(UsageMetric.PRIMARY,n.app,n.origin,time,grade,false,group.first().id)
-                        if(group.any{it.signal==Signal.STOP})closures+=ClosedEvidence(UsageMetric.VISIBLE,n.app,n.origin,time,grade,false,group.first().id)
+            val needsSnapshot=(nodes.isNotEmpty()||focusRefs.isNotEmpty())&&batch.any{it.signal in SNAPSHOT_SIGNALS}
+            val nodesBefore=if(needsSnapshot)nodes.toMap()else emptyMap()
+            val focusBefore=if(needsSnapshot)focusRefs.toMap()else emptyMap()
+            if(needsSnapshot){
+                batch.groupBy{it.key}.forEach{(key,group)->
+                    if(hasAtMostOneKind(group,FOCUS_SIGNALS)&&hasAtMostOneKind(group,LIFECYCLE_SIGNALS)){
+                        if(group.any{it.signal in FOCUS_END_SIGNALS})focusBefore[key]?.let{ref->UsageMetric.entries.forEach{m->focusEnds.getOrPut(m){mutableSetOf()}.add(ref);nodesBefore[key]?.let{n->closures+=ClosedEvidence(m,n.app,ref,time,Evidence.CONFIRMED,true,group.first().id)}}}
+                        nodesBefore[key]?.let{n->
+                            val grade=if(n.stage==ActivityStage.UNKNOWN)Evidence.UNKNOWN else Evidence.INFERRED
+                            if(group.any{it.signal in PAUSE_OR_STOP_SIGNALS})closures+=ClosedEvidence(UsageMetric.PRIMARY,n.app,n.origin,time,grade,false,group.first().id)
+                            if(group.any{it.signal==Signal.STOP})closures+=ClosedEvidence(UsageMetric.VISIBLE,n.app,n.origin,time,grade,false,group.first().id)
+                        }
                     }
                 }
+                if(batch.any{it.signal==Signal.SCREEN_OFF})focusBefore.values.forEach{ref->UsageMetric.entries.forEach{m->focusEnds.getOrPut(m){mutableSetOf()}.add(ref)}}
+                else if(batch.any{it.signal==Signal.NON_INTERACTIVE})focusBefore.values.forEach{focusEnds.getOrPut(UsageMetric.PRIMARY){mutableSetOf()}.add(it)}
             }
-            if(batch.any{it.signal==Signal.SCREEN_OFF})focusBefore.values.forEach{ref->UsageMetric.entries.forEach{m->focusEnds.getOrPut(m){mutableSetOf()}.add(ref)}}
-            else if(batch.any{it.signal==Signal.NON_INTERACTIVE})focusBefore.values.forEach{focusEnds.getOrPut(UsageMetric.PRIMARY){mutableSetOf()}.add(it)}
-            batch.lastOrNull{it.signal in setOf(Signal.SCREEN_ON,Signal.SCREEN_OFF,Signal.NON_INTERACTIVE)}?.let{screenRef=it.id}
-            batch.lastOrNull{it.signal in setOf(Signal.LOCK,Signal.UNLOCK)}?.let{lockRef=it.id}
+            batch.lastOrNull{it.signal in SCREEN_SIGNALS}?.let{screenRef=it.id}
+            batch.lastOrNull{it.signal in LOCK_SIGNALS}?.let{lockRef=it.id}
             screen=knowledge(Signal.SCREEN_ON,Signal.SCREEN_OFF,screen)
             if(batch.any{it.signal==Signal.NON_INTERACTIVE})screen=if(batch.any{it.signal==Signal.SCREEN_ON})Knowledge.UNKNOWN else Knowledge.NO
             if(batch.any{it.signal==Signal.SCREEN_OFF})displayOff=!batch.any{it.signal==Signal.SCREEN_ON}
-            else if(batch.any{it.signal in setOf(Signal.SCREEN_ON,Signal.NON_INTERACTIVE)})displayOff=false
+            else if(batch.any{it.signal in INTERACTIVE_CHANGE_SIGNALS})displayOff=false
             locked=knowledge(Signal.LOCK,Signal.UNLOCK,locked)
             if(screen==Knowledge.NO||locked==Knowledge.YES){
                 // Resolve a pending prefix even when this boundary is in a later replay chunk.
-                val boundary=batch.firstOrNull{it.signal in setOf(Signal.SCREEN_OFF,Signal.NON_INTERACTIVE,Signal.LOCK)}
+                val boundary=batch.firstOrNull{it.signal in LOCK_OR_OFF_SIGNALS}
                 if(boundary!=null)focusBefore.forEach{(key,origin)->nodesBefore[key]?.let{node->
                     UsageMetric.entries.forEach{metric->
                         val grade=if(origin in focusEnds[metric].orEmpty())Evidence.CONFIRMED else Evidence.UNKNOWN
@@ -172,10 +196,10 @@ object DualUsageEngine {
                 focuses.clear();focusRefs.clear()
             }
             // A public pause/stop cannot identify an own-window instance, but contradicts stale focus.
-            batch.filter{it.source==EvidenceSource.USAGE_EVENTS&&it.signal in setOf(Signal.PAUSE,Signal.STOP)}.forEach{e->
+            batch.filter{it.source==EvidenceSource.USAGE_EVENTS&&it.signal in PAUSE_OR_STOP_SIGNALS}.forEach{e->
                 nodes.filter{(_,n)->n.source==EvidenceSource.OWN_WINDOW&&n.app==e.app&&(e.activity.isBlank()||n.activity==e.activity)}.keys.toList().forEach own@{key->
                     // The same-time own callback resolves our actual instance; the public event agrees.
-                    if(batch.any{it.key==key&&it.signal in setOf(Signal.PAUSE,Signal.STOP)})return@own
+                    if(batch.any{it.key==key&&it.signal in PAUSE_OR_STOP_SIGNALS})return@own
                     if(batch.any{it.key==key&&it.signal==Signal.RESUME})return@own
                     val old=nodes[key]
                     if(old!=null)UsageMetric.entries.forEach{m->closures+=ClosedEvidence(m,old.app,old.origin,time,Evidence.UNKNOWN,false,e.id);focusRefs[key]?.let{closures+=ClosedEvidence(m,old.app,it,time,Evidence.UNKNOWN,true,e.id)}}
@@ -185,7 +209,7 @@ object DualUsageEngine {
                     diagnostics+=EngineDiagnostic(time,"UNRESOLVED_INSTANCE_CONTRADICTION",key)
                 }
             }
-            val lifecycle=batch.filter{it.signal in setOf(Signal.RESUME,Signal.PAUSE,Signal.STOP)}.groupBy{it.key}
+            val lifecycle=batch.filter{it.signal in LIFECYCLE_SIGNALS}.groupBy{it.key}
             lifecycle.forEach{(key,group)->
                 val kinds=group.map{it.signal}.toSet();val event=group.first()
                 if(event.app.isBlank()){diagnostics+=EngineDiagnostic(time,"MISSING_PACKAGE",event.id);return@forEach}
@@ -204,7 +228,7 @@ object DualUsageEngine {
                         }
                         else {
                             if(event.source==EvidenceSource.OWN_WINDOW){
-                                nodes.filter{(k,n)->k!=key&&n.source==EvidenceSource.OWN_WINDOW&&n.app==event.app&&n.activity==event.activity&&n.stage==ActivityStage.RESUMED&&batch.none{it.key==k&&it.signal in setOf(Signal.PAUSE,Signal.STOP)}}.keys.toList().forEach{k->
+                                nodes.filter{(k,n)->k!=key&&n.source==EvidenceSource.OWN_WINDOW&&n.app==event.app&&n.activity==event.activity&&n.stage==ActivityStage.RESUMED&&batch.none{it.key==k&&it.signal in PAUSE_OR_STOP_SIGNALS}}.keys.toList().forEach{k->
                                     val old=nodes.getValue(k)
                                     nodes[k]=old.copy(stage=ActivityStage.UNKNOWN)
                                     UsageMetric.entries.forEach{m->closures+=ClosedEvidence(m,old.app,old.origin,time,Evidence.UNKNOWN,false,event.id);focusRefs[k]?.let{closures+=ClosedEvidence(m,old.app,it,time,Evidence.UNKNOWN,true,event.id)}}
@@ -228,8 +252,8 @@ object DualUsageEngine {
             }
             batch.filter{it.signal==Signal.FOCUS_GAIN||it.signal==Signal.FOCUS_LOSS}.groupBy{it.key}.forEach{(key,group)->
                 val e=group.first()
-                if(e.instance==null||e.source !in setOf(EvidenceSource.OWN_WINDOW,EvidenceSource.TEST))diagnostics+=EngineDiagnostic(time,"UNTRUSTED_FOCUS_REJECTED",key)
-                else if(group.map{it.signal}.toSet().size>1){focuses.remove(key);focusRefs.remove(key);diagnostics+=EngineDiagnostic(time,"CONFLICTING_FOCUS_TRANSITION",key)}
+                if(e.instance==null||e.source !in TRUSTED_FOCUS_SOURCES)diagnostics+=EngineDiagnostic(time,"UNTRUSTED_FOCUS_REJECTED",key)
+                else if(!hasAtMostOneKind(group,FOCUS_SIGNALS)){focuses.remove(key);focusRefs.remove(key);diagnostics+=EngineDiagnostic(time,"CONFLICTING_FOCUS_TRANSITION",key)}
                 else if(e.signal==Signal.FOCUS_GAIN){deniedFocus.remove(key);if(key !in focuses){focuses[key]=e.app;focusRefs[key]=e.id}}else {focuses.remove(key);focusRefs.remove(key);deniedFocus.add(key)}
             }
         }
@@ -237,8 +261,11 @@ object DualUsageEngine {
         val tail=EngineState(nodes.toMap(),screen,locked,focuses.toMap(),refs,screenRef,lockRef,focusRefs.toMap(),displayOff,deniedFocus.toSet(),clockTrusted)
         val resolvedClosures=normalizeClosures(closures)
         val byProof=resolvedClosures.groupBy{Triple(it.metric,it.app,it.origin)}
+        val activeFocusRefs=focusRefs.values.toSet()
+        val liveResumedByApp=nodes.values.filter{it.stage==ActivityStage.RESUMED}.groupBy({it.app},{it.origin}).mapValues{(_,v)->v.toSet()}
+        val liveVisibleByApp=nodes.values.groupBy({it.app},{it.origin}).mapValues{(_,v)->v.toSet()}
         val annotated=slices.map{slice->
-            val live=nodes.values.filter{it.app==slice.app&&(slice.metric==UsageMetric.VISIBLE||it.stage==ActivityStage.RESUMED)}
+            if(slice.app==null)return@map slice.copy(provisional=false,evidence=slice.evidence)
             val explicit=slice.reason.startsWith("EXPLICIT")
             val endings=slice.proofRefs.flatMap{origin->
                 byProof[Triple(slice.metric,slice.app,origin)].orEmpty().filter{it.focus==explicit&&it.at>=slice.end}.let{items->
@@ -248,10 +275,10 @@ object DualUsageEngine {
             }
             val closed=endings.any{it.evidence!=Evidence.UNKNOWN}
             val aborted=!closed&&endings.any{it.evidence==Evidence.UNKNOWN}
-            val active=if(explicit)focusRefs.values.toSet()else live.map{it.origin}.toSet()
-            val pending=slice.app!=null&&!closed&&!aborted&&slice.proofRefs.any{it in active}
-            val grade=when{aborted||slice.app!=null&&!closed->Evidence.UNKNOWN;else->slice.evidence}
-            slice.copy(provisional=pending,evidence=grade,reason=slice.reason+if(pending&&slice.app!=null)"_OPEN_TAIL"else if(aborted)"_END_UNKNOWN"else "")
+            val active=if(explicit)activeFocusRefs else (if(slice.metric==UsageMetric.VISIBLE)liveVisibleByApp[slice.app]else liveResumedByApp[slice.app]).orEmpty()
+            val pending=!closed&&!aborted&&slice.proofRefs.any{it in active}
+            val grade=when{aborted||!closed->Evidence.UNKNOWN;else->slice.evidence}
+            slice.copy(provisional=pending,evidence=grade,reason=slice.reason+if(pending)"_OPEN_TAIL"else if(aborted)"_END_UNKNOWN"else "")
         }
         return EngineResult(merge(annotated),tail,diagnostics,resolvedClosures)
     }
@@ -273,8 +300,9 @@ object DualReports {
         fun duration(grade:Evidence)=chosen.filter{it.evidence==grade&&it.app!=null}.groupBy{it.app}.values.sumOf{items->Reports.unionDuration(items.map{Window(it.start,it.end)},window)}
         fun uncertain(s:UsageSlice)=s.evidence!=Evidence.CONFIRMED||s.provisional
         val known=scope.filter{!uncertain(it)}.map{Window(it.start,it.end)}
-        val explicitUnknown=Reports.unionDuration(scope.filter{uncertain(it)}.map{Window(it.start,it.end)},window)
-        val missing=(window.duration-Reports.unionDuration(known+scope.filter{uncertain(it)}.map{Window(it.start,it.end)},window)).coerceAtLeast(0)
+        val uncertainWindows=scope.filter{uncertain(it)}.map{Window(it.start,it.end)}
+        val explicitUnknown=Reports.unionDuration(uncertainWindows,window)
+        val missing=(window.duration-Reports.unionDuration(known+uncertainWindows,window)).coerceAtLeast(0)
         return MetricSummary(duration(Evidence.CONFIRMED),duration(Evidence.INFERRED),explicitUnknown+missing,Reports.unionDuration(chosen.filter{it.provisional}.map{Window(it.start,it.end)},window))
     }
     fun daily(slices:List<UsageSlice>,metric:UsageMetric,window:Window,zone:ZoneId):List<Pair<Window,MetricSummary>> = Reports.slots(window,zone,Grain.DAY).map{it to summary(slices,metric,it)}

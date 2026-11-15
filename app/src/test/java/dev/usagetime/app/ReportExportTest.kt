@@ -88,4 +88,55 @@ class ReportExportTest {
         assertTrue(csv.contains("42"))
         assertFalse(csv.contains("主要使用时间"))
     }
+
+    @Test fun compareExportCapturesAndFormatsBothPeriods()=runBlocking{
+        val primary=report(42)
+        val other=report(21)
+        val snapshot=ReportExportRequest.load(
+            demo=false,
+            selection=Selection(page=2,metric=UsageMetric.PRIMARY),
+            includeConfirmed=false,
+            clock=now,
+            zone=zone
+        ){_,_,_,_-> DisplayData(report=primary,other=other) }
+        assertSame(other,snapshot.other)
+        val csv=CsvReportFormat.build(snapshot){"示例应用"}
+        assertTrue(csv.contains("周期A汇总,\"主要使用时间\",对比周期A,,42"))
+        assertTrue(csv.contains("周期A应用,\"主要使用时间\",\"示例应用\",\"com.example\",42"))
+        assertTrue(csv.contains("周期B汇总,\"主要使用时间\",对比周期B,,21"))
+        assertTrue(csv.contains("周期B应用,\"主要使用时间\",\"示例应用\",\"com.example\",21"))
+    }
+
+    @Test fun csvNeutralizesFormulaPrefixesAndEscapesQuotes() {
+        val report = UsageReport(
+            Window(now - 1_000, now),
+            emptyList(),
+            listOf(AppTotal("=pkg\"one", 10), AppTotal("+pkg", 20), AppTotal("-pkg", 30), AppTotal("@SUM(A1)", 40)),
+            0,
+            false
+        )
+        val snapshot = ReportExportSnapshot(report, UsageMetric.PRIMARY, legacy = true, includeConfirmed = true)
+        val csv = CsvReportFormat.build(snapshot) { pkg -> pkg }
+        assertTrue(csv.startsWith("\uFEFF"))
+        assertTrue(csv.contains("\"'=pkg\"\"one\""))
+        assertTrue(csv.contains("\"'+pkg\""))
+        assertTrue(csv.contains("\"'-pkg\""))
+        assertTrue(csv.contains("\"'@SUM(A1)\""))
+        assertTrue(csv.contains("\"旧版未分级\""))
+    }
+
+    @Test fun exportThrowsWhenNoReportIsLoaded() {
+        val failure = assertThrows(IllegalStateException::class.java) {
+            runBlocking {
+                ReportExportRequest.load(
+                    demo = false,
+                    selection = Selection(),
+                    includeConfirmed = false,
+                    clock = now,
+                    zone = zone
+                ) { _, _, _, _ -> DisplayData(report = null) }
+            }
+        }
+        assertEquals("暂无记录", failure.message)
+    }
 }

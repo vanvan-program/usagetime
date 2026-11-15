@@ -8,6 +8,7 @@ data class MetricDayCell(val start:Long,val end:Long,val app:String?,val evidenc
 object DailyMetrics {
     const val SUMMARY="__QUALITY_SUMMARY__"
     const val OBSERVED="__CONFIRMED_COVERAGE__"
+    private val HOUR_FORMATTER = DateTimeFormatter.ofPattern("HH:mm")
     /** Filter only attributed values; quality and coverage sentinels describe the original evidence. */
     fun displayCells(cells:List<MetricDayCell>,includeConfirmed:Boolean):List<MetricDayCell> =
         if(includeConfirmed)cells else cells.filter{it.evidence!=Evidence.CONFIRMED||it.app==null||it.app==SUMMARY||it.app==OBSERVED}
@@ -43,7 +44,7 @@ object DailyMetrics {
             val observed=cells.filter{it.app==OBSERVED}.sumOf{it.millis}
             covered+=observed
             val complete=observed>=slot.duration&&cells.filter{it.app==SUMMARY}.sumOf{it.millis}==0L
-            val label=Instant.ofEpochMilli(slot.start).atZone(zone).format(DateTimeFormatter.ofPattern("HH:mm"))
+            val label=Instant.ofEpochMilli(slot.start).atZone(zone).format(HOUR_FORMATTER)
             Bucket(slot.start,slot.end,label,value,complete,complete||value>0||observed>0)
         }
         val summary=slotCells.flatMap{it.second}.filter{it.app==SUMMARY}

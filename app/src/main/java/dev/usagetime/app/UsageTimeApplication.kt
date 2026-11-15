@@ -2,6 +2,7 @@ package dev.usagetime.app
 
 import android.app.Application
 import dev.usagetime.app.data.*
+import kotlinx.coroutines.launch
 
 class UsageTimeApplication:Application(){
     val processSession:String=java.util.UUID.randomUUID().toString()
@@ -10,9 +11,14 @@ class UsageTimeApplication:Application(){
     val store by lazy{UsageStore(this)}
     override fun onCreate(){
         super.onCreate()
-        schedule(this)
-        runCatching {
-            dev.usagetime.app.sync.PhoneSyncSettings.schedule(this, dev.usagetime.app.sync.PhoneSyncSettings(this).load().enabled)
+        observationScope.launch{
+            schedule(this@UsageTimeApplication)
+            runCatching {
+                dev.usagetime.app.sync.PhoneSyncSettings.schedule(
+                    this@UsageTimeApplication,
+                    dev.usagetime.app.sync.PhoneSyncSettings(this@UsageTimeApplication).load().enabled
+                )
+            }
         }
     }
     companion object {

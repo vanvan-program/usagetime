@@ -2,6 +2,8 @@ package dev.usagetime.app.sync
 
 import android.content.Context
 import android.util.AtomicFile
+import androidx.core.content.edit
+import dev.usagetime.app.data.PhoneSyncHelpers
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
@@ -15,7 +17,6 @@ import org.w3c.dom.Element
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.net.URI
-import java.security.MessageDigest
 import java.util.UUID
 import javax.xml.parsers.DocumentBuilderFactory
 
@@ -80,14 +81,7 @@ object DesktopSync {
     private const val MAX_DAY_MILLIS = 26L * 3_600_000
     private val mutex = Mutex()
 
-    fun root(text: String): URI {
-        val base = URI(text.trim().trimEnd('/') + "/")
-        require(
-            base.scheme == "https" && !base.host.isNullOrBlank() &&
-                base.userInfo == null && base.query == null && base.fragment == null
-        ) { "请输入 HTTPS WebDAV 地址，账号密码请填在独立输入框" }
-        return base.resolve("$NAMESPACE/")
-    }
+    fun root(text: String): URI = SyncSupport.resolveWebDavRoot(text, NAMESPACE)
 
     private fun directory(context: Context) = File(context.filesDir, "desktop-sync")
     private fun indexFile(context: Context) = AtomicFile(File(directory(context), "index.json"))
@@ -127,9 +121,12 @@ object DesktopSync {
         return DesktopIndex(devices.take(MAX_DEVICES))
     }
 
-    fun readDay(context: Context, deviceId: String, date: String): DesktopDay? {
+    fun readDay(context: Context, deviceId: String, date: String): DesktopDay? =
+        readDay(context, readIndex(context), deviceId, date)
+
+    internal fun readDay(context: Context, index: DesktopIndex, deviceId: String, date: String): DesktopDay? {
         if (!validDevice(deviceId) || !validDate(date)) return null
-        val device = readIndex(context).device(deviceId) ?: return null
+        val device = index.device(deviceId) ?: return null
         val hash = device.days[date] ?: return null
         val file = dayFile(context, deviceId, date, hash)
         if (!file.exists()) return null
@@ -160,24 +157,24 @@ object DesktopSync {
             val config = PhoneSyncSettings(context).load()
             require(config.enabled) { "请先在「设置 → 云端同步」启用同步" }
             val status = context.getSharedPreferences("desktop-sync-status", Context.MODE_PRIVATE)
-            status.edit().putString("message", "正在拉取电脑用时…").putString("error", null).apply()
+            status.edit { putString("message", "正在拉取电脑用时…").putString("error", null) }
             try {
                 val pullContext = currentCoroutineContext()
                 val count = pullLocked(context, config) { pullContext.ensureActive() }
                 pullContext.ensureActive()
-                status.edit()
-                    .putLong("lastSuccess", System.currentTimeMillis())
-                    .putString("message", if (count == 0) "已是最新，电脑用时没有新记录" else "已拉取 $count 个电脑日记录")
-                    .putString("error", null)
-                    .apply()
+                status.edit {
+                    putLong("lastSuccess", System.currentTimeMillis())
+                    putString("message", if (count == 0) "已是最新，电脑用时没有新记录" else "已拉取 $count 个电脑日记录")
+                    putString("error", null)
+                }
                 count
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
-                status.edit()
-                    .putString("message", "电脑用时拉取失败，已保留上次缓存：${error.message ?: "网络错误"}")
-                    .putString("error", error.message?.take(200) ?: "网络错误")
-                    .apply()
+                status.edit {
+                    putString("message", "电脑用时拉取失败，已保留上次缓存：${error.message ?: "网络错误"}")
+                    putString("error", error.message?.take(200) ?: "网络错误")
+                }
                 throw error
             }
         }
@@ -214,11 +211,12 @@ object DesktopSync {
                 ensureEnabled()
                 val file = dayFile(context, id, date, hash)
                 val known = previous.device(id)?.days?.get(date) == hash
-                if (!file.exists() || !known) {
+                val cached = file.exists() && (known || isCachedDayValid(file, id, date, hash))
+                if (!cached) {
                     val dayPath = "$id/$date.$hash.dhday"
                     val body = PhoneCrypto.decrypt(secret, dayPath, dav.get(dayPath, 8 * 1024 * 1024), AAD)
                     ensureEnabled()
-                    require(sha256(body) == hash) { "电脑日记录摘要不匹配" }
+                    require(PhoneSyncHelpers.sha256Hex(body) == hash) { "电脑日记录摘要不匹配" }
                     val day = parseDay(body)
                     require(day.deviceId == id && day.date == date) { "电脑日记录来源不匹配" }
                     writeDay(file, body)
@@ -263,16 +261,7 @@ object DesktopSync {
             .put("devices", devices)
             .toString()
             .toByteArray(Charsets.UTF_8)
-        val file = indexFile(context)
-        file.baseFile.parentFile?.mkdirs()
-        val stream = file.startWrite()
-        try {
-            stream.write(body)
-            file.finishWrite(stream)
-        } catch (error: Exception) {
-            file.failWrite(stream)
-            throw error
-        }
+        SyncSupport.writeAtomicBytes(indexFile(context), body)
     }
 
     private fun prune(context: Context, devices: List<DesktopDevice>) {
@@ -439,6 +428,9 @@ object DesktopSync {
     fun validDate(date: String): Boolean =
         runCatching { java.time.LocalDate.parse(date).toString() == date }.getOrDefault(false)
 
-    private fun sha256(bytes: ByteArray): String =
-        MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+    internal fun isCachedDayValid(file: File, deviceId: String, date: String, expectedHash: String): Boolean =
+        file.exists() && runCatching {
+            val bytes = file.readBytes()
+            PhoneSyncHelpers.sha256Hex(bytes) == expectedHash && parseDay(bytes).let { it.deviceId == deviceId && it.date == date }
+        }.getOrDefault(false)
 }

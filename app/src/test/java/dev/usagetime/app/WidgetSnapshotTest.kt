@@ -73,4 +73,28 @@ class WidgetSnapshotTest {
         assertEquals("3时12分", compactWidgetDuration(192 * 60000L))
         assertEquals("48时", compactWidgetDuration(48 * 3600000L))
     }
+
+    @Test fun weekValueLabelTracksBarTopWithUpperBound() {
+        assertEquals(32f, weekValueBaseline(96f, true), 0.01f)
+        assertEquals(80f, weekValueBaseline(48f, true), 0.01f)
+        assertEquals(128f, weekValueBaseline(0f, true), 0.01f)
+        assertEquals(113f, weekValueBaseline(0f, false), 0.01f)
+    }
+
+    @Test fun comparisonAndWeekSummaryCoverEqualMissingPermissionAndEmptyWeek() {
+        assertEquals("与昨日同时段持平", snapshot(report(120_000), report(120_000)).comparison)
+        assertEquals("打开用时记补记", snapshot(report(0, false)).comparison)
+        assertEquals(
+            "请开启使用情况访问",
+            snapshot(report(0, false)).copy(permitted = false).comparison
+        )
+        val noWeek = snapshot(report(0, false))
+        assertEquals(7, noWeek.days.size)
+        assertTrue(noWeek.days.none { it.available })
+        assertEquals("7天均未记录", noWeek.weekSummary)
+        assertEquals("0分", compactWidgetDuration(-500))
+        assertEquals("<1分", compactWidgetDuration(59_999))
+        assertEquals("1分", compactWidgetDuration(60_000))
+        assertEquals("2时", compactWidgetDuration(120 * 60_000L))
+    }
 }

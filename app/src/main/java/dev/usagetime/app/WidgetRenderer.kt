@@ -15,12 +15,14 @@ import android.os.Bundle
 import android.util.SizeF
 import android.view.View
 import android.widget.RemoteViews
+import androidx.core.graphics.createBitmap
 import androidx.core.graphics.toColorInt
+import androidx.core.net.toUri
 import dev.usagetime.core.Dates
 import dev.usagetime.core.durationText
 import java.time.Instant
 import java.time.format.DateTimeFormatter
-import kotlin.math.min
+import kotlin.math.max
 import kotlin.math.roundToInt
 
 class WidgetRenderer(private val context: Context, private val darkOverride: Boolean? = null) {
@@ -52,13 +54,15 @@ class WidgetRenderer(private val context: Context, private val darkOverride: Boo
         val height = rawHeight / scale
         val width = rawWidth / scale
         val style = if (height < 100 || width < 140 ||
-            (requested in listOf(WidgetStyle.TODAY, WidgetStyle.APPS) && height < 150) ||
+            ((requested == WidgetStyle.TODAY || requested == WidgetStyle.APPS) && height < 150) ||
             (requested == WidgetStyle.CATEGORIES && height < 130)) WidgetStyle.QUICK else requested
         val views = base(style, requested, id)
         val date = Dates.date(snapshot.now, snapshot.zone)
-        val dateLabel = date.format(DateTimeFormatter.ofPattern("M/d"))
+        val dateLabel = date.format(WIDGET_DATE_FORMATTER)
         views.setTextViewText(R.id.widget_title, if (style == WidgetStyle.QUICK) "今日用时" else "${style.label} · $dateLabel")
-        views.setTextViewText(R.id.widget_total, snapshot.totalText)
+        if (style != WidgetStyle.WEEK) {
+            views.setTextViewText(R.id.widget_total, snapshot.totalText)
+        }
         views.setContentDescription(R.id.widget_root, "${requested.label}，${snapshot.metricLabel}，今日${snapshot.totalText}")
         views.setOnClickPendingIntent(R.id.widget_root, openIntent(requested))
         if (style == WidgetStyle.QUICK) {
@@ -67,7 +71,9 @@ class WidgetRenderer(private val context: Context, private val darkOverride: Boo
             return views
         }
         views.setTextViewText(R.id.widget_updated, footer(snapshot))
-        views.setTextViewText(R.id.widget_comparison, snapshot.comparison)
+        if (style != WidgetStyle.WEEK) {
+            views.setTextViewText(R.id.widget_comparison, snapshot.comparison)
+        }
         views.setTextViewText(R.id.widget_metric, snapshot.metricLabel)
         if (height < 280) views.setViewVisibility(R.id.widget_metric, View.GONE)
         when (style) {
@@ -104,15 +110,17 @@ class WidgetRenderer(private val context: Context, private val darkOverride: Boo
             }
             WidgetStyle.WEEK -> {
                 val report = snapshot.week
+                val days = snapshot.days
+                val weekSummary = snapshot.weekSummary
                 views.setTextViewText(R.id.widget_total,
-                    if (snapshot.days.any { it.available }) compactWidgetDuration(report?.total ?: 0) else "未记录")
-                views.setTextViewText(R.id.widget_comparison, snapshot.weekSummary)
-                views.setTextViewText(R.id.widget_title, "七日趋势 · ${date.minusDays(6).format(DateTimeFormatter.ofPattern("M/d"))}—$dateLabel")
-                views.setImageViewBitmap(R.id.widget_chart, weekChart(snapshot))
-                views.setContentDescription(R.id.widget_chart, snapshot.days.joinToString("；") {
+                    if (days.any { it.available }) compactWidgetDuration(report?.total ?: 0) else "未记录")
+                views.setTextViewText(R.id.widget_comparison, weekSummary)
+                views.setTextViewText(R.id.widget_title, "七日趋势 · ${date.minusDays(6).format(WIDGET_DATE_FORMATTER)}—$dateLabel")
+                views.setImageViewBitmap(R.id.widget_chart, weekChart(snapshot, days))
+                views.setContentDescription(R.id.widget_chart, days.joinToString("；") {
                     "${it.date}，${if (it.available) durationText(it.millis) else "未记录"}${if (it.available && !it.complete) "，部分记录" else ""}"
                 })
-                views.setContentDescription(R.id.widget_root, "七日趋势，${snapshot.metricLabel}，${snapshot.weekSummary}")
+                views.setContentDescription(R.id.widget_root, "七日趋势，${snapshot.metricLabel}，$weekSummary")
             }
             WidgetStyle.QUICK -> Unit
         }
@@ -143,7 +151,7 @@ class WidgetRenderer(private val context: Context, private val darkOverride: Boo
 
     private fun footer(snapshot: WidgetSnapshot): String {
         val at = snapshot.lastCollected?.let {
-            Instant.ofEpochMilli(it).atZone(snapshot.zone).format(DateTimeFormatter.ofPattern("M/d HH:mm"))
+            Instant.ofEpochMilli(it).atZone(snapshot.zone).format(WIDGET_UPDATED_FORMATTER)
         }
         return "${if (snapshot.available && !snapshot.today.fullyCovered) "部分记录 · " else ""}补记 ${at ?: "暂无"}"
     }
@@ -177,7 +185,7 @@ class WidgetRenderer(private val context: Context, private val darkOverride: Boo
     private fun openIntent(style: WidgetStyle, app: String? = null): PendingIntent {
         val destination = "usagetime://widget/${style.name}/${Uri.encode(app.orEmpty())}"
         val intent = Intent(context, MainActivity::class.java).apply {
-            data = Uri.parse(destination)
+            data = destination.toUri()
             flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
             putExtra(UsageWidgetProvider.EXTRA_PAGE, if (style == WidgetStyle.APPS || style == WidgetStyle.CATEGORIES) 1 else 0)
             putExtra(UsageWidgetProvider.EXTRA_WEEK, style == WidgetStyle.WEEK)
@@ -217,7 +225,7 @@ class WidgetRenderer(private val context: Context, private val darkOverride: Boo
     }
 
     private fun shareBar(share: Int, color: Int): Bitmap {
-        val bitmap = Bitmap.createBitmap(400, 6, Bitmap.Config.ARGB_8888)
+        val bitmap = createBitmap(400, 6)
         val canvas = Canvas(bitmap)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG)
         paint.color = track
@@ -236,7 +244,7 @@ class WidgetRenderer(private val context: Context, private val darkOverride: Boo
         }
 
     private fun hourlyChart(snapshot: WidgetSnapshot): Bitmap {
-        val bitmap = Bitmap.createBitmap(720, 112, Bitmap.Config.ARGB_8888)
+        val bitmap = createBitmap(720, 112)
         val canvas = Canvas(bitmap)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG)
         val buckets = snapshot.today.buckets.groupBy { Instant.ofEpochMilli(it.start).atZone(snapshot.zone).hour }
@@ -273,7 +281,7 @@ class WidgetRenderer(private val context: Context, private val darkOverride: Boo
     }
 
     private fun categoryChart(snapshot: WidgetSnapshot): Bitmap {
-        val bitmap = Bitmap.createBitmap(200, 200, Bitmap.Config.ARGB_8888)
+        val bitmap = createBitmap(200, 200)
         val canvas = Canvas(bitmap)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 24f; color = track }
         val bounds = RectF(18f, 18f, 182f, 182f)
@@ -293,12 +301,12 @@ class WidgetRenderer(private val context: Context, private val darkOverride: Boo
         return bitmap
     }
 
-    private fun weekChart(snapshot: WidgetSnapshot): Bitmap {
-        val bitmap = Bitmap.createBitmap(840, 200, Bitmap.Config.ARGB_8888)
+    private fun weekChart(snapshot: WidgetSnapshot, days: List<WidgetDay> = snapshot.days): Bitmap {
+        val bitmap = createBitmap(840, 200)
         val canvas = Canvas(bitmap)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { textAlign = Paint.Align.CENTER }
-        val maximum = snapshot.days.filter { it.available }.maxOfOrNull { it.millis }?.coerceAtLeast(1) ?: 1
-        snapshot.days.forEachIndexed { index, day ->
+        val maximum = days.filter { it.available }.maxOfOrNull { it.millis }?.coerceAtLeast(1) ?: 1
+        days.forEachIndexed { index, day ->
             val center = 60f + index * 120
             val height = if (day.available) (day.millis.toDouble() / maximum * 96).toFloat() else 0f
             paint.color = if (index == 6) accent else categoryColors[1]
@@ -314,20 +322,25 @@ class WidgetRenderer(private val context: Context, private val darkOverride: Boo
                 canvas.drawRoundRect(center - 24, 127f, center + 24, 142f, 4f, 4f, paint)
                 paint.style = Paint.Style.FILL
             }
-            paint.textSize = 26f
             paint.color = muted
             paint.textSize = 32f
             val value = if (day.millis < 3600000) compactWidgetDuration(day.millis)
                 else "%.1f时".format(java.util.Locale.CHINA, day.millis / 3600000.0)
-            canvas.drawText(if (day.available) value else "—", center, min(128f - height, 32f), paint)
+            canvas.drawText(if (day.available) value else "—", center, weekValueBaseline(height, day.available), paint)
             if (day.available && !day.complete) {
                 paint.color = warning
                 canvas.drawCircle(center, 152f, 3f, paint)
             }
             paint.textSize = 32f
             paint.color = if (index == 6) accent else muted
-            canvas.drawText(if (index == 6) "今天" else day.date.format(DateTimeFormatter.ofPattern("M/d")), center, 190f, paint)
+            canvas.drawText(if (index == 6) "今天" else day.date.format(WIDGET_DATE_FORMATTER), center, 190f, paint)
         }
         return bitmap
     }
 }
+
+private val WIDGET_DATE_FORMATTER = DateTimeFormatter.ofPattern("M/d")
+private val WIDGET_UPDATED_FORMATTER = DateTimeFormatter.ofPattern("M/d HH:mm")
+
+internal fun weekValueBaseline(height: Float, available: Boolean): Float =
+    max(32f, (if (available) 142f - height else 127f) - 14f)

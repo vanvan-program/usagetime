@@ -10,6 +10,8 @@ import dev.usagetime.core.AppCategory
 
 /** Writes the existing backup format; the caller owns the snapshot lock and transaction. */
 internal object BackupStreamWriter {
+    private val BOOLEAN_COLUMNS = setOf("reliable", "provisional", "blocked", "known")
+
     suspend fun write(output: OutputStream, categories: Map<String, AppCategory> = emptyMap(), query: (String) -> Cursor) {
         val writer = JsonWriter(OutputStreamWriter(output, Charsets.UTF_8))
         writer.beginObject().name("format").value("usagetime-backup").name("version").value(3L).name("exportedAt").value(System.currentTimeMillis())
@@ -26,7 +28,7 @@ internal object BackupStreamWriter {
                         writer.name(name)
                         when (cursor.getType(i)) {
                             Cursor.FIELD_TYPE_NULL -> writer.nullValue()
-                            Cursor.FIELD_TYPE_INTEGER -> if (name in setOf("reliable", "provisional", "blocked", "known")) writer.value(cursor.getLong(i) != 0L) else writer.value(cursor.getLong(i))
+                            Cursor.FIELD_TYPE_INTEGER -> if (name in BOOLEAN_COLUMNS) writer.value(cursor.getLong(i) != 0L) else writer.value(cursor.getLong(i))
                             else -> writer.value(cursor.getString(i))
                         }
                     }

@@ -3,8 +3,6 @@ package dev.usagetime.app.sync
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import java.io.ByteArrayOutputStream
-import java.io.InputStream
 import java.net.URI
 import java.util.Base64
 import java.util.concurrent.TimeUnit
@@ -16,9 +14,13 @@ internal class PhoneDav(
     private val beforeRequest: () -> Unit = {}
 ) {
     private val authorization = "Basic " + Base64.getEncoder().encodeToString("$user:$password".toByteArray(Charsets.UTF_8))
-    private val client = OkHttpClient.Builder().followRedirects(false).followSslRedirects(false)
-        .connectTimeout(20, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS)
-        .callTimeout(45, TimeUnit.SECONDS).build()
+    private val client get() = sharedClient
+
+    companion object {
+        private val sharedClient = OkHttpClient.Builder().followRedirects(false).followSslRedirects(false)
+            .connectTimeout(20, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS)
+            .callTimeout(45, TimeUnit.SECONDS).build()
+    }
 
     fun request(path: String, method: String, bytes: ByteArray? = null, headers: Map<String, String> = emptyMap()): Int {
         beforeRequest()
@@ -48,20 +50,10 @@ internal class PhoneDav(
             check(response.isSuccessful) { "WebDAV 请求失败（HTTP ${response.code}）" }
             val body = response.body ?: error("WebDAV 返回为空")
             check(body.contentLength() <= maxBytes) { "同步文件超出大小上限" }
-            body.byteStream().use { readLimited(it, maxBytes) }
+            body.byteStream().use {
+                SyncSupport.readLimitedBytes(it, maxBytes, "同步文件超出大小上限", beforeRequest)
+            }
         }
-    }
-    private fun readLimited(input: InputStream, maxBytes: Int): ByteArray {
-        val output = ByteArrayOutputStream()
-        val buffer = ByteArray(16 * 1024)
-        while (true) {
-            beforeRequest()
-            val count = input.read(buffer)
-            if (count <= 0) break
-            output.write(buffer, 0, count)
-            check(output.size() <= maxBytes) { "同步文件超出大小上限" }
-        }
-        return output.toByteArray()
     }
     fun mkdir(path: String) {
         val code = request(path, "MKCOL")

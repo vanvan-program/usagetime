@@ -3,6 +3,8 @@ package dev.usagetime.app
 import android.app.Application
 import androidx.compose.runtime.*
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.core.content.edit
+import androidx.core.graphics.createBitmap
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.usagetime.app.data.Records
@@ -49,9 +51,11 @@ class UsageModel(application:Application,val store:dev.usagetime.app.data.UsageS
     private var desktopPullJob:Job?=null
     var recording by mutableStateOf(store.recording);private set
     var now by mutableLongStateOf(wallClock());private set
-    private val iconCache=object:android.util.LruCache<String,android.graphics.Bitmap>(2*1024*1024){
-        override fun sizeOf(key:String,value:android.graphics.Bitmap)=value.allocationByteCount
+    private data class CachedAppIcon(val bitmap:androidx.compose.ui.graphics.ImageBitmap,val bytes:Int)
+    private val iconCache=object:android.util.LruCache<String,CachedAppIcon>(2*1024*1024){
+        override fun sizeOf(key:String,value:CachedAppIcon)=value.bytes
     }
+    private val missingIcons=android.util.LruCache<String,Boolean>(256)
     private var labelTick by mutableIntStateOf(0)
     val labelRevision:Int get()=labelTick
     var lastLoadMillis:Double=0.0;private set
@@ -86,7 +90,10 @@ class UsageModel(application:Application,val store:dev.usagetime.app.data.UsageS
         val previous=selection
         selection=update(previous)
         if(!demo&&(selection.metric!=previous.metric||selection.legacy!=previous.legacy)){
-            prefs.edit().putString("widget-metric",selection.metric.name).putBoolean("widget-legacy",selection.legacy).apply()
+            prefs.edit {
+                putString("widget-metric", selection.metric.name)
+                putBoolean("widget-legacy", selection.legacy)
+            }
             UsageWidgetProvider.requestUpdate(getApplication())
         }
         // These controls only render/filter the already loaded report, even while a query is running.
@@ -104,7 +111,7 @@ class UsageModel(application:Application,val store:dev.usagetime.app.data.UsageS
         insightJob?.cancel()
         val generation=++insightGeneration
         insights=InsightData(year)
-        val isDemo=demo;val clock=wallClock();val currentZone=ZoneId.systemDefault()
+        val isDemo=demo;val clock=if(isDemo)now else wallClock();val currentZone=ZoneId.systemDefault()
         val metric=selection.metric;val legacy=selection.legacy;val confirmed=showConfirmed
         insightJob=viewModelScope.launch{
             insightsLoading=true;insightsError=null
@@ -126,13 +133,13 @@ class UsageModel(application:Application,val store:dev.usagetime.app.data.UsageS
                     }else store.read(todayWindow,metric).slices
                     InsightData(year,UsageInsights.timeline(slices,metric,todayWindow),UsageInsights.calendar(report?.buckets.orEmpty(),currentZone))
                 }
-                insights=result
+                insights=result;now=clock;zone=currentZone
             }catch(error:CancellationException){throw error}
             catch(error:Exception){insightsError="分析暂时无法读取，请重试：${error.message}"}
             finally{if(generation==insightGeneration)insightsLoading=false}
         }
     }
-    fun theme(value:String){appearance=value;prefs.edit().putString("theme",value).apply();UsageWidgetProvider.requestUpdate(getApplication())}
+    fun theme(value:String){appearance=value;prefs.edit { putString("theme", value) };UsageWidgetProvider.requestUpdate(getApplication())}
     fun showDesktopData(value:Boolean){
         if(showDesktopData==value)return
         DesktopDataSettings.save(getApplication(),value)
@@ -150,35 +157,49 @@ class UsageModel(application:Application,val store:dev.usagetime.app.data.UsageS
     fun showConfirmed(value:Boolean){
         if(showConfirmed==value)return
         showConfirmed=value
-        prefs.edit().putBoolean("show-confirmed",value).apply()
+        prefs.edit { putBoolean("show-confirmed", value) }
         UsageWidgetProvider.requestUpdate(getApplication())
         display=DisplayData(first=display.first,last=display.last)
         reload()
     }
     fun enableRecording(value:Boolean){recording=value;store.recording=value;if(value)refresh()}
     fun label(pkg:String):String{labelTick;return demoNames[pkg]?:store.cachedLabel(pkg)?:pkg.substringAfterLast('.')}
-    fun cachedIcon(pkg:String)=iconCache[pkg]?.asImageBitmap()
+    fun cachedIcon(pkg:String)=iconCache[pkg]?.bitmap
     suspend fun loadIcon(pkg:String)=withContext(Dispatchers.IO){
-        runCatching{(iconCache[pkg]?:run{
+        iconCache[pkg]?.bitmap?.let{return@withContext it}
+        if(missingIcons[pkg]==true)return@withContext null
+        runCatching{
             val drawable=getApplication<Application>().packageManager.getApplicationIcon(pkg)
-            val bitmap=android.graphics.Bitmap.createBitmap(64,64,android.graphics.Bitmap.Config.ARGB_8888)
-            drawable.setBounds(0,0,64,64);drawable.draw(android.graphics.Canvas(bitmap));iconCache.put(pkg,bitmap);bitmap
-        })}.getOrNull()?.asImageBitmap()
+            val bitmap=createBitmap(64,64)
+            drawable.setBounds(0,0,64,64);drawable.draw(android.graphics.Canvas(bitmap))
+            val image=bitmap.asImageBitmap()
+            iconCache.put(pkg,CachedAppIcon(image,bitmap.allocationByteCount))
+            image
+        }.onFailure{missingIcons.put(pkg,true)}.getOrNull()
     }
     fun refresh(){
         if(refreshJob?.isActive==true)return
-        permitted=store.permitted()
+        val beforePermitted=store.permitted()
+        permitted=beforePermitted
         refreshJob=viewModelScope.launch {
             busy=true
             syncError=null
+            val beforeRevision=store.reportRevision.value
             // Reading saved history must not depend on a successful system query.
-            runCatching{store.loadNames()}
+            runCatching{store.ensureNamesLoaded()}
             reload()
             reportRequests.join()
             try{if(!demo){val text=store.collect();if(permitted&&recording&&text!="已保存最新记录")message=text}}
             catch(e:CancellationException){throw e}
             catch(e:Exception){syncError="补记失败：${e.message?:e.javaClass.simpleName}";message=syncError}
-            finally{now=wallClock();busy=false;permitted=store.permitted();safetyInfo=store.storageInfo();reload();if(!demo)UsageWidgetProvider.requestUpdate(getApplication())}
+            finally{
+                val afterPermitted=store.permitted()
+                val revisionChanged=store.reportRevision.value!=beforeRevision
+                val permissionChanged=afterPermitted!=beforePermitted
+                now=wallClock();busy=false;permitted=afterPermitted;safetyInfo=store.storageInfo()
+                if(permissionChanged&&!revisionChanged)reload()
+                if(!demo&&(revisionChanged||permissionChanged))UsageWidgetProvider.requestUpdate(getApplication())
+            }
         }
     }
     fun rebuildHistory(){
@@ -200,17 +221,17 @@ class UsageModel(application:Application,val store:dev.usagetime.app.data.UsageS
         }
     }
     fun period(value:Period){change{it.copy(period=value,anchor=Dates.date(wallClock(),ZoneId.systemDefault()),grain=Grain.MONTH)}}
-    fun move(direction:Long){change{it.copy(anchor=when(it.period){Period.WEEK,Period.DAYS7->it.anchor.plusWeeks(direction);Period.MONTH->it.anchor.plusMonths(direction);Period.DAYS30->it.anchor.plusDays(30*direction);else->it.anchor.plusDays(direction)})}}
+    fun move(direction:Long){change{it.stepAnchor(direction)}}
     fun reload(){
         if(!demo)categories=categoryPreferences.read()
-        if(selection.page>=3){reportRequests.stop();display=display.invalidateReport();return}
-        reportRequests.cancel()
         val isDemo=demo;val clock=if(isDemo)now else wallClock();val z=ZoneId.systemDefault();val includeConfirmed=showConfirmed
         val today=Dates.date(clock,z)
         if(today!=observedToday){selection=selection.followCurrentDate(observedToday,today);observedToday=today}
+        now=clock
+        if(selection.page>=3){zone=z;reportRequests.stop();display=display.invalidateReport();return}
+        reportRequests.cancel()
         val s=selection
         reportSelection=s
-        now=clock
         val requestedAt=android.os.SystemClock.elapsedRealtimeNanos()
         reportRequests.submit(load={loadDisplay(s,isDemo,clock,z,includeConfirmed)}){result->
             display=result;zone=z;loadError=null

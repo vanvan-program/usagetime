@@ -2,6 +2,8 @@ package dev.usagetime.app
 
 import dev.usagetime.app.sync.DesktopSync
 import dev.usagetime.app.sync.PhoneCrypto
+import dev.usagetime.app.sync.PhoneSyncSettings
+import dev.usagetime.app.sync.SyncSupport
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -142,5 +144,138 @@ class DesktopSyncTest {
             ),
             DesktopSync.parseHrefs(xml)
         )
+    }
+
+    @Test
+    fun cachedDayVerificationSupportsResumablePullsAndRejectsTampering() {
+        val bytes = payload()
+        val hash = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(bytes).joinToString("") { "%02x".format(it) }
+        val temp = kotlin.io.path.createTempFile("dhday-test-", ".dhday").toFile()
+        try {
+            temp.writeBytes(bytes)
+            assertTrue(
+                DesktopSync.isCachedDayValid(
+                    temp,
+                    "11111111-1111-4111-8111-111111111111",
+                    "2026-11-09",
+                    hash
+                )
+            )
+            assertFalse(
+                DesktopSync.isCachedDayValid(
+                    temp,
+                    "11111111-1111-4111-8111-111111111111",
+                    "2026-11-10",
+                    hash
+                )
+            )
+            assertFalse(
+                DesktopSync.isCachedDayValid(
+                    temp,
+                    "11111111-1111-4111-8111-111111111111",
+                    "2026-11-09",
+                    "0".repeat(64)
+                )
+            )
+            temp.writeBytes(payload(declared = 900_001))
+            val corruptHash = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(temp.readBytes()).joinToString("") { "%02x".format(it) }
+            assertFalse(
+                DesktopSync.isCachedDayValid(
+                    temp,
+                    "11111111-1111-4111-8111-111111111111",
+                    "2026-11-09",
+                    corruptHash
+                )
+            )
+        } finally {
+            temp.delete()
+        }
+    }
+
+    @Test
+    fun syncSupportUnifiesRootValidationAndRejectsInvalidNamespaces() {
+        assertEquals(
+            "https://dav.example.com/dav/usagetime-v1/",
+            PhoneSyncSettings.rootUrl("https://dav.example.com/dav///").toString()
+        )
+        assertEquals(
+            "https://dav.example.com/dav/hindsight-desktop-v1/",
+            SyncSupport.resolveWebDavRoot("https://dav.example.com/dav", DesktopSync.NAMESPACE).toString()
+        )
+        assertThrows(IllegalArgumentException::class.java) {
+            SyncSupport.resolveWebDavRoot("https://dav.example.com/dav#frag", "usagetime-v1")
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            SyncSupport.resolveWebDavRoot("https://dav.example.com/dav", "///")
+        }
+    }
+
+    @Test
+    fun parseHrefsBlocksDoctypeAndHandlesQueryAndBlankEntries() {
+        val xxe = """
+            <?xml version="1.0"?>
+            <!DOCTYPE foo [ <!ENTITY xxe SYSTEM "file:///etc/passwd"> ]>
+            <d:multistatus xmlns:d="DAV:">
+              <d:response><d:href>/dav/11111111-1111-4111-8111-111111111111.dhmanifest</d:href></d:response>
+            </d:multistatus>
+        """.trimIndent().toByteArray(Charsets.UTF_8)
+        assertThrows(Exception::class.java) { DesktopSync.parseHrefs(xxe) }
+
+        val xml = """
+            <?xml version="1.0"?>
+            <d:multistatus xmlns:d="DAV:">
+              <d:response><d:href>   </d:href></d:response>
+              <d:response><d:href>https://dav.example.com/dav/hindsight-desktop-v1/11111111-1111-4111-8111-111111111111.dhmanifest?v=2#top</d:href></d:response>
+            </d:multistatus>
+        """.trimIndent().toByteArray(Charsets.UTF_8)
+        assertEquals(
+            listOf("11111111-1111-4111-8111-111111111111.dhmanifest"),
+            DesktopSync.parseHrefs(xml)
+        )
+    }
+
+    @Test
+    fun parseDaySortsEntriesAppliesFallbacksAndRejectsInvalidBounds() {
+        val raw = JSONObject(String(payload(recorded = 0), Charsets.UTF_8))
+            .put(
+                "apps",
+                JSONArray()
+                    .put(JSONObject().put("app", "Small").put("label", "").put("category", "").put("categoryLabel", "").put("millis", 100L))
+                    .put(JSONObject().put("app", "Large").put("label", "大图").put("category", "work").put("categoryLabel", "工作").put("millis", 300L))
+            )
+            .put(
+                "categories",
+                JSONArray()
+                    .put(JSONObject().put("category", "other").put("label", "").put("millis", 100L))
+                    .put(JSONObject().put("category", "work").put("label", "工作").put("millis", 300L))
+            )
+            .put("recordedMillis", 400L)
+            .toString()
+            .toByteArray(Charsets.UTF_8)
+        val parsed = DesktopSync.parseDay(raw)
+        assertEquals(listOf("Large", "Small"), parsed.apps.map { it.app })
+        assertEquals("Small", parsed.apps.last().label)
+        assertEquals("其他", parsed.apps.last().categoryLabel)
+        assertEquals(listOf("work", "other"), parsed.categories.map { it.category })
+        assertEquals("other", parsed.categories.last().label)
+
+        val mismatchedCategory = JSONObject(String(payload(recorded = 100L), Charsets.UTF_8)).apply {
+            getJSONArray("categories").getJSONObject(0).put("millis", 99L)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            DesktopSync.parseDay(mismatchedCategory.toString().toByteArray(Charsets.UTF_8))
+        }
+
+        val overMaxDay = JSONObject(String(payload(recorded = 26L * 3_600_000 + 1), Charsets.UTF_8))
+        assertThrows(IllegalArgumentException::class.java) {
+            DesktopSync.parseDay(overMaxDay.toString().toByteArray(Charsets.UTF_8))
+        }
+
+        val wrongVersion = JSONObject(String(payload(), Charsets.UTF_8)).put("version", 2)
+        assertThrows(IllegalArgumentException::class.java) {
+            DesktopSync.parseDay(wrongVersion.toString().toByteArray(Charsets.UTF_8))
+        }
     }
 }

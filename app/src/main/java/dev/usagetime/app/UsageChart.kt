@@ -62,6 +62,11 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
+private val TOP_HOUR_STEPS = doubleArrayOf(
+    0.5, 1.0, 2.0, 4.0, 6.0, 8.0, 12.0, 18.0, 24.0,
+    48.0, 96.0, 192.0, 384.0, 768.0, 1536.0
+)
+
 @Composable
 fun UsageChart(left: List<Bucket>, right: List<Bucket>? = null, line: Boolean = false) {
     val count = max(left.size, right?.size ?: 0)
@@ -100,15 +105,50 @@ fun UsageChart(left: List<Bucket>, right: List<Bucket>? = null, line: Boolean = 
         }
     }
 
-    val maxValue = remember(left, right) {
-        max(left.maxOfOrNull { it.millis } ?: 0L, right?.maxOfOrNull { it.millis } ?: 0L)
+    val (topHours, maxMs) = remember(left, right) {
+        val maxValue = max(left.maxOfOrNull { it.millis } ?: 0L, right?.maxOfOrNull { it.millis } ?: 0L)
+        val maxHours = (maxValue / 3_600_000.0 * 1.12).coerceAtLeast(0.5)
+        val top = TOP_HOUR_STEPS.firstOrNull { it >= maxHours } ?: (ceil(maxHours / 100) * 100)
+        top to (top * 3_600_000)
     }
-    val maxHours = (maxValue / 3_600_000.0 * 1.12).coerceAtLeast(0.5)
-    val topHours = listOf(
-        0.5, 1.0, 2.0, 4.0, 6.0, 8.0, 12.0, 18.0, 24.0,
-        48.0, 96.0, 192.0, 384.0, 768.0, 1536.0
-    ).firstOrNull { it >= maxHours } ?: ceil(maxHours / 100) * 100
-    val maxMs = topHours * 3_600_000
+    val selectedBarBrush = remember(c.accent, c.accentDeep) {
+        Brush.verticalGradient(listOf(c.accent, c.accentDeep))
+    }
+    val barBrush = remember(c.accent) {
+        Brush.verticalGradient(listOf(c.accent.copy(alpha = 0.88f), c.accent.copy(alpha = 0.42f)))
+    }
+    val compareBarBrush = remember(c.accent) {
+        Brush.verticalGradient(listOf(c.accent.copy(alpha = 0.92f), c.accent.copy(alpha = 0.45f)))
+    }
+    val gridDash = remember(density) {
+        PathEffect.dashPathEffect(floatArrayOf(with(density) { 2.dp.toPx() }, with(density) { 4.dp.toPx() }))
+    }
+    val seriesDash = remember(density) {
+        PathEffect.dashPathEffect(floatArrayOf(with(density) { 6.dp.toPx() }, with(density) { 5.dp.toPx() }))
+    }
+    val solidLineStroke = remember(density) {
+        Stroke(width = with(density) { 2.5.dp.toPx() }, cap = StrokeCap.Round)
+    }
+    val dashedLineStroke = remember(density, seriesDash) {
+        Stroke(width = with(density) { 2.5.dp.toPx() }, cap = StrokeCap.Round, pathEffect = seriesDash)
+    }
+    val compareStroke = remember(density) { Stroke(width = with(density) { 1.4.dp.toPx() }) }
+    val dotRingStroke = remember(density) { Stroke(with(density) { 1.5.dp.toPx() }) }
+    val highlightCorner = remember(density) {
+        val px = with(density) { 2.dp.toPx() }
+        CornerRadius(px, px)
+    }
+    val compareCorner = remember(density) {
+        val px = with(density) { 5.dp.toPx() }
+        CornerRadius(px, px)
+    }
+    val labelIndices = remember(count) {
+        if (count <= 6) {
+            (0 until count).toList()
+        } else {
+            listOf(0, count / 4, count / 2, count * 3 / 4, count - 1).distinct()
+        }
+    }
 
     fun valueText(bucket: Bucket?): String =
         if (bucket?.available == true) durationText(bucket.millis) else "未记录"
@@ -172,6 +212,8 @@ fun UsageChart(left: List<Bucket>, right: List<Bucket>? = null, line: Boolean = 
             )
 
             paint.textAlign = Paint.Align.LEFT
+            val gridStrokeWidth = 1.dp.toPx()
+            val labelStartX = 1.dp.toPx()
             for (i in 0..3) {
                 val value = topHours * i / 3
                 val at = topInset + chartHeight - chartHeight * i / 3
@@ -179,8 +221,8 @@ fun UsageChart(left: List<Bucket>, right: List<Bucket>? = null, line: Boolean = 
                     color = c.borderSubtle,
                     start = Offset(leftInset, at),
                     end = Offset(size.width - rightInset, at),
-                    strokeWidth = 1.dp.toPx(),
-                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(2.dp.toPx(), 4.dp.toPx()))
+                    strokeWidth = gridStrokeWidth,
+                    pathEffect = gridDash
                 )
                 val label = when {
                     i == 0 -> "0"
@@ -190,96 +232,88 @@ fun UsageChart(left: List<Bucket>, right: List<Bucket>? = null, line: Boolean = 
                 }
                 drawContext.canvas.nativeCanvas.drawText(
                     label,
-                    1.dp.toPx(),
+                    labelStartX,
                     at + textSize * 0.35f,
                     paint
                 )
             }
 
-            val labelIndices = if (count <= 6) {
-                (0 until count).toList()
-            } else {
-                listOf(0, count / 4, count / 2, count * 3 / 4, count - 1).distinct()
-            }
+            paint.textAlign = Paint.Align.CENTER
+            val labelBaselineY = size.height - 5.dp.toPx()
             labelIndices.forEach { i ->
                 val label = (left.getOrNull(i) ?: right?.getOrNull(i))?.label ?: ""
-                paint.textAlign = Paint.Align.CENTER
                 drawContext.canvas.nativeCanvas.drawText(
                     label,
                     x(i),
-                    size.height - 5.dp.toPx(),
+                    labelBaselineY,
                     paint
                 )
             }
 
             fun drawBars() {
                 if (line) return
+                val minBarHeight = 1.5.dp.toPx()
+                val maxBarWidth = 24.dp.toPx()
+                val maxSingleRadius = 6.dp.toPx()
+                val highlightMinHeight = 8.dp.toPx()
+                val highlightInset = 3.dp.toPx()
+                val highlightThickness = 2.dp.toPx()
+                val bar = min(maxBarWidth, slot * if (right == null) 0.58f else 0.34f)
+                val singleCornerRadius = CornerRadius(min(maxSingleRadius, bar / 2), min(maxSingleRadius, bar / 2))
                 for (i in 0 until count) {
                     val a = left.getOrNull(i)
                     val b = right?.getOrNull(i)
-                    val bar = min(24.dp.toPx(), slot * if (right == null) 0.58f else 0.34f)
 
                     if (right == null) {
                         if (a?.available == true) {
                             val rawHeight = (a.millis.toDouble() / maxMs * chartHeight).toFloat()
-                            val height = (rawHeight * reveal).coerceAtLeast(if (a.millis > 0) 1.5.dp.toPx() else 0f)
+                            val height = (rawHeight * reveal).coerceAtLeast(if (a.millis > 0) minBarHeight else 0f)
                             val center = x(i)
-                            val fill = if (i == selected) {
-                                Brush.verticalGradient(listOf(c.accent, c.accentDeep))
-                            } else {
-                                Brush.verticalGradient(
-                                    listOf(
-                                        c.accent.copy(alpha = 0.88f),
-                                        c.accent.copy(alpha = 0.42f)
-                                    )
-                                )
-                            }
                             drawRoundRect(
-                                brush = fill,
+                                brush = if (i == selected) selectedBarBrush else barBrush,
                                 topLeft = Offset(center - bar / 2, topInset + chartHeight - height),
                                 size = Size(bar, height),
-                                cornerRadius = CornerRadius(min(6.dp.toPx(), bar / 2), min(6.dp.toPx(), bar / 2))
+                                cornerRadius = singleCornerRadius
                             )
-                            if (i == selected && height > 8.dp.toPx()) {
+                            if (i == selected && height > highlightMinHeight) {
                                 drawRoundRect(
                                     color = Color.White.copy(alpha = 0.32f),
-                                    topLeft = Offset(center - bar * 0.26f, topInset + chartHeight - height + 3.dp.toPx()),
-                                    size = Size(bar * 0.52f, 2.dp.toPx()),
-                                    cornerRadius = CornerRadius(2.dp.toPx(), 2.dp.toPx())
+                                    topLeft = Offset(center - bar * 0.26f, topInset + chartHeight - height + highlightInset),
+                                    size = Size(bar * 0.52f, highlightThickness),
+                                    cornerRadius = highlightCorner
                                 )
                             }
                         }
                     } else {
                         val leftBar = a?.takeIf { it.available && it.millis > 0 }?.let {
-                            ((it.millis.toDouble() / maxMs * chartHeight).toFloat() * reveal).coerceAtLeast(1.5.dp.toPx())
+                            ((it.millis.toDouble() / maxMs * chartHeight).toFloat() * reveal).coerceAtLeast(minBarHeight)
                         }
                         val rightBar = b?.takeIf { it.available && it.millis > 0 }?.let {
-                            ((it.millis.toDouble() / maxMs * chartHeight).toFloat() * reveal).coerceAtLeast(1.5.dp.toPx())
+                            ((it.millis.toDouble() / maxMs * chartHeight).toFloat() * reveal).coerceAtLeast(minBarHeight)
                         }
                         val center = x(i)
                         if (leftBar != null) {
                             drawRoundRect(
-                                brush = Brush.verticalGradient(
-                                    listOf(c.accent.copy(alpha = 0.92f), c.accent.copy(alpha = 0.45f))
-                                ),
+                                brush = compareBarBrush,
                                 topLeft = Offset(center - bar * 1.05f, topInset + chartHeight - leftBar),
-                                size = Size(bar, leftBar.coerceAtLeast(1.5.dp.toPx())),
-                                cornerRadius = CornerRadius(5.dp.toPx(), 5.dp.toPx())
+                                size = Size(bar, leftBar.coerceAtLeast(minBarHeight)),
+                                cornerRadius = compareCorner
                             )
                         }
                         if (rightBar != null) {
+                            val h = rightBar.coerceAtLeast(minBarHeight)
                             drawRoundRect(
                                 color = c.peach.copy(alpha = 0.72f),
                                 topLeft = Offset(center + bar * 0.05f, topInset + chartHeight - rightBar),
-                                size = Size(bar, rightBar.coerceAtLeast(1.5.dp.toPx())),
-                                cornerRadius = CornerRadius(5.dp.toPx(), 5.dp.toPx()),
-                                style = Stroke(width = 1.4.dp.toPx())
+                                size = Size(bar, h),
+                                cornerRadius = compareCorner,
+                                style = compareStroke
                             )
                             drawRoundRect(
                                 color = c.peach.copy(alpha = 0.16f),
                                 topLeft = Offset(center + bar * 0.05f, topInset + chartHeight - rightBar),
-                                size = Size(bar, rightBar.coerceAtLeast(1.5.dp.toPx())),
-                                cornerRadius = CornerRadius(5.dp.toPx(), 5.dp.toPx())
+                                size = Size(bar, h),
+                                cornerRadius = compareCorner
                             )
                         }
                     }
@@ -288,6 +322,7 @@ fun UsageChart(left: List<Bucket>, right: List<Bucket>? = null, line: Boolean = 
 
             fun drawSeries() {
                 if (!line) return
+                val dotRadius = 3.5.dp.toPx()
                 fun series(points: List<Bucket>, color: Color, dashed: Boolean) {
                     val path = Path()
                     var started = false
@@ -308,21 +343,15 @@ fun UsageChart(left: List<Bucket>, right: List<Bucket>? = null, line: Boolean = 
                     drawPath(
                         path,
                         color,
-                        style = Stroke(
-                            width = 2.5.dp.toPx(),
-                            cap = StrokeCap.Round,
-                            pathEffect = if (dashed) {
-                                PathEffect.dashPathEffect(floatArrayOf(6.dp.toPx(), 5.dp.toPx()))
-                            } else null
-                        )
+                        style = if (dashed) dashedLineStroke else solidLineStroke
                     )
                     if (count <= 32) {
                         points.forEachIndexed { index, bucket ->
                             if (bucket.available) {
                                 val point = Offset(x(index), y((bucket.millis * reveal).toLong()))
-                                drawCircle(if (dashed) c.card else color, 3.5.dp.toPx(), point)
+                                drawCircle(if (dashed) c.card else color, dotRadius, point)
                                 if (dashed) {
-                                    drawCircle(color, 3.5.dp.toPx(), point, style = Stroke(1.5.dp.toPx()))
+                                    drawCircle(color, dotRadius, point, style = dotRingStroke)
                                 }
                             }
                         }

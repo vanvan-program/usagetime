@@ -48,4 +48,28 @@ class UsageTest {
         val w=Window(Dates.midnight(d,z),Dates.midnight(d.plusDays(1),z))
         assertEquals(23*3600000L,w.duration);assertEquals(23,Reports.slots(w,z,Grain.HOUR).size)
     }
+    @Test fun excludedPackagesAndShutdownRestartStayBounded() {
+        val excluded=setOf("com.android.launcher")
+        val events=listOf(
+            Event(10,EventKind.RESUME,"com.android.launcher"),
+            Event(20,EventKind.RESUME,"app.used"),
+            Event(30,EventKind.SHUTDOWN),
+            Event(40,EventKind.STARTUP),
+            Event(45,EventKind.RESUME,"app.used"),
+            Event(50,EventKind.UNLOCK),
+            Event(60,EventKind.PAUSE,"app.used")
+        )
+        val parsed=UsageParser.parse(events,Window(0,70),excluded=excluded)
+        assertEquals(listOf(Interval("app.used",20,30),Interval("app.used",50,60)),parsed.intervals)
+    }
+    @Test fun normalizeMergesTouchingOrOverlappingSameAppIntervalsOnly() {
+        val normalized=UsageParser.normalize(listOf(
+            Interval("a",10,20),
+            Interval("a",20,30),
+            Interval("a",25,35),
+            Interval("b",15,25),
+            Interval("a",40,50)
+        ))
+        assertEquals(listOf(Interval("a",10,35),Interval("b",15,25),Interval("a",40,50)),normalized)
+    }
 }

@@ -22,6 +22,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.time.Instant
 import java.time.ZoneId
 
@@ -41,29 +43,40 @@ enum class WidgetStyle(
 
 open class UsageWidgetProvider : AppWidgetProvider() {
     override fun onAppWidgetOptionsChanged(context: Context, manager: AppWidgetManager, appWidgetId: Int, options: Bundle) {
-        refreshAsync(context)
+        refreshAsync(context, styleForProvider(), intArrayOf(appWidgetId))
     }
 
     override fun onUpdate(context: Context, manager: AppWidgetManager, appWidgetIds: IntArray) {
-        refreshAsync(context)
+        refreshAsync(context, styleForProvider(), appWidgetIds)
     }
 
     override fun onEnabled(context: Context) {
-        refreshAsync(context)
+        refreshAsync(context, styleForProvider(), null)
     }
 
     override fun onReceive(context: Context, intent: Intent) {
         super.onReceive(context, intent)
-        if (intent.action == ACTION_REFRESH) refreshAsync(context)
+        if (intent.action == ACTION_REFRESH) refreshAsync(context, styleForProvider(), null)
     }
 
-    private fun refreshAsync(context: Context) {
-        if (installed(context).isEmpty()) return
+    private fun styleForProvider(): WidgetStyle? =
+        WidgetStyle.entries.firstOrNull { it.provider == javaClass }
+
+    private fun refreshAsync(context: Context, targetStyle: WidgetStyle?, targetIds: IntArray?) {
+        val manager = AppWidgetManager.getInstance(context)
+        val ids = when {
+            targetIds != null -> targetIds
+            targetStyle != null -> manager.getAppWidgetIds(ComponentName(context, targetStyle.provider))
+            else -> null
+        }
+        if (ids != null && ids.isEmpty()) return
+        if (ids == null && installed(context).isEmpty()) return
         val pending = goAsync()
         val appContext = context.applicationContext
-        CoroutineScope(Dispatchers.IO).launch {
+        val scope = (appContext as? UsageTimeApplication)?.observationScope ?: CoroutineScope(Dispatchers.IO)
+        scope.launch {
             try {
-                WidgetUpdater.refresh(appContext)
+                WidgetUpdater.refresh(appContext, targetStyle, targetIds)
             } catch (_: CancellationException) {
             } catch (_: Exception) {
             } finally {
@@ -86,11 +99,15 @@ open class UsageWidgetProvider : AppWidgetProvider() {
         }
 
         fun requestUpdate(context: Context) {
-            if (installed(context).isNotEmpty()) {
-                WorkManager.getInstance(context).enqueueUniqueWork(
-                    "usage-widget", ExistingWorkPolicy.REPLACE,
-                    OneTimeWorkRequestBuilder<UsageWidgetWorker>().build()
-                )
+            val appContext = context.applicationContext
+            val scope = (appContext as? UsageTimeApplication)?.observationScope ?: CoroutineScope(Dispatchers.IO)
+            scope.launch {
+                if (installed(appContext).isNotEmpty()) {
+                    WorkManager.getInstance(appContext).enqueueUniqueWork(
+                        "usage-widget", ExistingWorkPolicy.REPLACE,
+                        OneTimeWorkRequestBuilder<UsageWidgetWorker>().build()
+                    )
+                }
             }
         }
 
@@ -108,10 +125,17 @@ class CategoriesWidgetProvider : UsageWidgetProvider()
 class WeekWidgetProvider : UsageWidgetProvider()
 
 object WidgetUpdater {
-    suspend fun refresh(context: Context) {
-        val installed = UsageWidgetProvider.installed(context)
-        if (installed.isEmpty() || !context.getSystemService(UserManager::class.java).isUserUnlocked) return
+    private val refreshMutex = Mutex()
+
+    suspend fun refresh(context: Context, targetStyle: WidgetStyle? = null, targetIds: IntArray? = null) = refreshMutex.withLock {
         val manager = AppWidgetManager.getInstance(context)
+        val targets: Map<WidgetStyle, IntArray> = if (targetStyle != null) {
+            val ids = targetIds ?: manager.getAppWidgetIds(ComponentName(context, targetStyle.provider))
+            if (ids.isEmpty()) emptyMap() else mapOf(targetStyle to ids)
+        } else {
+            UsageWidgetProvider.installed(context)
+        }
+        if (targets.isEmpty() || !context.getSystemService(UserManager::class.java).isUserUnlocked) return
         val preferences = context.getSharedPreferences("usage-settings", Context.MODE_PRIVATE)
         val renderer = WidgetRenderer(context)
         try {
@@ -130,16 +154,34 @@ object WidgetUpdater {
             suspend fun report(window: Window, grain: Grain) =
                 if (legacy) store.aggregateLegacy(window, zone, grain, null)
                 else store.aggregate(window, zone, grain, metric, null, confirmed)
+            val needsYesterday = targets.keys.any {
+                it == WidgetStyle.TODAY || it == WidgetStyle.APPS || it == WidgetStyle.CATEGORIES
+            }
+            val needsWeek = WidgetStyle.WEEK in targets
+            val needsCategories = WidgetStyle.CATEGORIES in targets
+            val needsNames = targets.keys.any { it == WidgetStyle.TODAY || it == WidgetStyle.APPS }
+            val todayReport = report(Window(start, now), Grain.HOUR)
+            val yesterdayReport = if (needsYesterday) {
+                report(Window(yesterdayStart, yesterdayEnd), Grain.HOUR)
+            } else {
+                dev.usagetime.core.UsageReport(Window(yesterdayStart, yesterdayEnd), emptyList(), emptyList(), 0L, false)
+            }
             val snapshot = WidgetSnapshot(
                 now = now, zone = zone,
-                today = report(Window(start, now), Grain.HOUR),
-                yesterday = report(Window(yesterdayStart, yesterdayEnd), Grain.HOUR),
-                week = if (WidgetStyle.WEEK in installed) report(Window(Dates.midnight(day.minusDays(6), zone), now), Grain.DAY) else null,
-                assignments = CategoryPreferences(context).read(),
+                today = todayReport,
+                yesterday = yesterdayReport,
+                week = if (needsWeek) report(Window(Dates.midnight(day.minusDays(6), zone), now), Grain.DAY) else null,
+                assignments = if (needsCategories) CategoryPreferences(context).read() else emptyMap(),
                 metricLabel = if (legacy) "旧版用时" else "${metric.label} · ${if (confirmed) "确认＋估计" else "估计累计"}",
                 lastCollected = store.last(), permitted = store.permitted()
             )
-            installed.forEach { (style, ids) ->
+            if (needsNames) {
+                store.ensureNamesLoaded()
+                snapshot.today.apps.forEach { app ->
+                    if (store.cachedLabel(app.app) == null) store.warmLabel(app.app)
+                }
+            }
+            targets.forEach { (style, ids) ->
                 ids.forEach { id ->
                     manager.updateAppWidget(id, renderer.render(style, id, manager.getAppWidgetOptions(id), snapshot, store::cachedLabel))
                 }
@@ -147,7 +189,7 @@ object WidgetUpdater {
         } catch (error: CancellationException) {
             throw error
         } catch (error: Exception) {
-            installed.forEach { (style, ids) ->
+            targets.forEach { (style, ids) ->
                 ids.forEach { id -> manager.updateAppWidget(id, renderer.error(style, id)) }
             }
             throw error

@@ -57,7 +57,7 @@ class StatisticsQueryTest {
             store.close()
             val changed=Room.databaseBuilder(context,UsageDatabase::class.java,name).build()
             try{
-                changed.openHelper.writableDatabase.execSQL("DELETE FROM daily_usage WHERE dayStart=? AND app=?",arrayOf(slots[130].start,DailyMetrics.SUMMARY))
+                changed.openHelper.writableDatabase.execSQL("DELETE FROM daily_usage WHERE dayStart=? AND app=?",arrayOf<Any?>(slots[130].start,DailyMetrics.SUMMARY))
             }finally{changed.close()}
             store=UsageStore(context,name)
             verify()

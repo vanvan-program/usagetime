@@ -19,6 +19,23 @@ data class Selection(
         compareA=if(compareA==previous)today else compareA,
         compareB=if(compareA==previous&&compareB==(if(monthly)previous.minusMonths(1)else previous.minusWeeks(1)))
             (if(monthly)today.minusMonths(1)else today.minusWeeks(1))else compareB)
+    fun stepAnchor(direction:Long)=copy(
+        anchor=when(period){
+            Period.WEEK,Period.DAYS7->anchor.plusWeeks(direction)
+            Period.MONTH->anchor.plusMonths(direction)
+            Period.DAYS30->anchor.plusDays(30*direction)
+            else->anchor.plusDays(direction)
+        }
+    )
+    fun canStepForward(today:LocalDate):Boolean{
+        if(period==Period.ALL||period==Period.CUSTOM)return false
+        val nextStart=when(period){
+            Period.WEEK->Dates.week(anchor).plusWeeks(1)
+            Period.MONTH->anchor.withDayOfMonth(1).plusMonths(1)
+            else->anchor.plusDays(1)
+        }
+        return nextStart<=today
+    }
 }
 data class DisplayData(val report:UsageReport?=null,val other:UsageReport?=null,val all:UsageReport?=null,val first:Long?=null,val last:Long?=null,val recordedDays:Int=0,val legacyAvailable:Boolean=false,val allOther:UsageReport?=null)
 

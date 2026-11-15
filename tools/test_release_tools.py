@@ -5,6 +5,7 @@ import tempfile
 import unittest
 
 from release_package import digest, package
+from audit_public_tree import audit_tree, is_ignored, load_gitignore
 from upgrade_check import fixture, fingerprint, read_preferences
 
 
@@ -43,6 +44,27 @@ class ReleaseToolsTest(unittest.TestCase):
             self.assertEqual("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", digest(path))
         self.assertEqual({"theme": "dark", "recording": "false"},
             read_preferences(b'<map><string name="theme">dark</string><boolean name="recording" value="false"/></map>'))
+
+    def test_audit_tree_honors_gitignore_when_git_absent_and_flags_unexpected_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / ".gitignore").write_text("*.log\n.qa-temp/\n**/build/\n", encoding="utf-8")
+            (root / ".qa-temp").mkdir()
+            (root / ".qa-temp" / "ignored.txt").write_text("temp", encoding="utf-8")
+            (root / "run.log").write_text("ignored log", encoding="utf-8")
+            (root / "app" / "src").mkdir(parents=True)
+            (root / "app" / "src" / "Sample.kt").write_text("package demo\n", encoding="utf-8")
+            rules = load_gitignore(root)
+            self.assertTrue(is_ignored(Path(".qa-temp/ignored.txt"), rules))
+            self.assertTrue(is_ignored(Path("app/build/classes/A.kt"), rules))
+            self.assertFalse(is_ignored(Path("app/src/Sample.kt"), rules))
+
+            clean_report = audit_tree(root)
+            self.assertEqual([], clean_report["findings"])
+
+            (root / "stray.json").write_text("{}", encoding="utf-8")
+            dirty_report = audit_tree(root)
+            self.assertTrue(any(f["file"] == "stray.json" and f["rule"] == "unexpected_root_file" for f in dirty_report["findings"]))
 
 
 if __name__ == "__main__":

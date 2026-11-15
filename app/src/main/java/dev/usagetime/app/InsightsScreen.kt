@@ -148,12 +148,13 @@ fun WidgetSettingsCard() {
 fun InsightsScreen(model: UsageModel) {
     val colors = hindsightColors()
     val today = Dates.date(model.now, model.zone)
+    val reportRevision by model.store.reportRevision.collectAsState()
     var tab by rememberSaveable { mutableIntStateOf(0) }
     var monthOffset by rememberSaveable { mutableLongStateOf(0L) }
     var heatmapYear by rememberSaveable { mutableIntStateOf(today.year) }
     val month = YearMonth.from(today).plusMonths(monthOffset)
     val requestedYear = if (tab == 1) month.year else if (tab == 2) heatmapYear else today.year
-    LaunchedEffect(requestedYear, model.demo, model.selection.metric, model.selection.legacy, model.showConfirmed, model.now / 60000, model.zone) {
+    LaunchedEffect(requestedYear, model.demo, model.selection.metric, model.selection.legacy, model.showConfirmed, model.now / 60000, model.zone, if (model.demo) 0L else reportRevision) {
         model.loadInsights(requestedYear)
     }
     val state = model.insights
@@ -257,12 +258,16 @@ fun InsightsScreen(model: UsageModel) {
     }
 }
 
+private val TIMELINE_TIME_FORMATTER = DateTimeFormatter.ofPattern("HH:mm")
+private val MONTH_WEEKDAY_HEADERS = listOf("一", "二", "三", "四", "五", "六", "日")
+private val MONTH_CELL_SHAPE = RoundedCornerShape(10.dp)
+private val HEATMAP_CELL_SHAPE = RoundedCornerShape(3.dp)
+
 @Composable
 private fun TimelineRow(model: UsageModel, entry: TimelineEntry) {
     val colors = hindsightColors()
-    val formatter = remember { DateTimeFormatter.ofPattern("HH:mm") }
-    val start = Instant.ofEpochMilli(entry.start).atZone(model.zone).format(formatter)
-    val end = Instant.ofEpochMilli(entry.end).atZone(model.zone).format(formatter)
+    val start = Instant.ofEpochMilli(entry.start).atZone(model.zone).format(TIMELINE_TIME_FORMATTER)
+    val end = Instant.ofEpochMilli(entry.end).atZone(model.zone).format(TIMELINE_TIME_FORMATTER)
     val tint = when {
         entry.missing -> colors.textFaint
         entry.provisional -> colors.warning
@@ -313,13 +318,16 @@ private fun PeriodHeading(title: String, canBack: Boolean, canForward: Boolean, 
 @Composable
 private fun MonthCalendar(model: UsageModel, month: YearMonth, days: Map<LocalDate, CalendarDay>, today: LocalDate) {
     val colors = hindsightColors()
-    val maximum = days.values.filter { YearMonth.from(it.date) == month && it.available }.maxOfOrNull { it.millis } ?: 0
+    val maximum = remember(month, days) {
+        days.values.filter { YearMonth.from(it.date) == month && it.available }.maxOfOrNull { it.millis } ?: 0L
+    }
+    val weeks = remember(month) { UsageInsights.monthGrid(month).chunked(7) }
     Row(Modifier.fillMaxWidth()) {
-        listOf("一", "二", "三", "四", "五", "六", "日").forEach {
+        MONTH_WEEKDAY_HEADERS.forEach {
             Text(it, Modifier.weight(1f).padding(vertical = 10.dp), textAlign = TextAlign.Center, color = colors.textMuted)
         }
     }
-    UsageInsights.monthGrid(month).chunked(7).forEach { week ->
+    weeks.forEach { week ->
         Row(Modifier.fillMaxWidth()) {
             week.forEach { date ->
                 val day = days[date]
@@ -334,11 +342,11 @@ private fun MonthCalendar(model: UsageModel, month: YearMonth, days: Map<LocalDa
                     else colors.accent.copy(alpha = 0.06f + UsageInsights.intensity(day!!.millis, maximum) * 0.055f)
                 Column(
                     Modifier.weight(1f).padding(2.dp).heightIn(min = 58.dp)
-                        .clip(RoundedCornerShape(10.dp)).background(fill)
+                        .clip(MONTH_CELL_SHAPE).background(fill)
                         .border(
                             1.dp,
                             if (date == today) colors.accent else if (available && day?.complete == false) colors.warning else Color.Transparent,
-                            RoundedCornerShape(10.dp)
+                            MONTH_CELL_SHAPE
                         )
                         .clickable(enabled = date != null && !future) { date?.let(model::openDate) }
                         .semantics {
@@ -360,14 +368,27 @@ private fun MonthCalendar(model: UsageModel, month: YearMonth, days: Map<LocalDa
 @Composable
 private fun YearHeatmap(year: Int, days: Map<LocalDate, CalendarDay>, today: LocalDate) {
     val colors = hindsightColors()
-    val first = LocalDate.of(year, 1, 1)
-    val start = first.minusDays((first.dayOfWeek.value - 1).toLong())
-    val end = LocalDate.of(year, 12, 31)
-    val weeks = ((java.time.temporal.ChronoUnit.DAYS.between(start, end) + 7) / 7).toInt()
-    val maximum = days.values.filter { it.available }.maxOfOrNull { it.millis } ?: 0
+    val (start, weeks) = remember(year) {
+        val first = LocalDate.of(year, 1, 1)
+        val s = first.minusDays((first.dayOfWeek.value - 1).toLong())
+        val end = LocalDate.of(year, 12, 31)
+        val w = ((java.time.temporal.ChronoUnit.DAYS.between(s, end) + 7) / 7).toInt()
+        s to w
+    }
+    val (maximum, recordedCount) = remember(days) {
+        var maxMillis = 0L
+        var count = 0
+        for (entry in days.values) {
+            if (entry.available) {
+                count++
+                if (entry.millis > maxMillis) maxMillis = entry.millis
+            }
+        }
+        maxMillis to count
+    }
     Row(
         Modifier.horizontalScroll(rememberScrollState()).clearAndSetSemantics {
-            contentDescription = "${year}年用时热力图，已记录${days.values.count { it.available }}天。可通过下方月份按钮查看每日明细。"
+            contentDescription = "${year}年用时热力图，已记录${recordedCount}天。可通过下方月份按钮查看每日明细。"
         },
         horizontalArrangement = Arrangement.spacedBy(3.dp)
     ) {
@@ -382,8 +403,8 @@ private fun YearHeatmap(year: Int, days: Map<LocalDate, CalendarDay>, today: Loc
                         alpha = 0.12f + UsageInsights.intensity(day!!.millis, maximum) * 0.2f
                     )
                     Box(
-                        Modifier.size(15.dp).background(fill, RoundedCornerShape(3.dp))
-                            .border(1.dp, if (inRange && !available) colors.border else Color.Transparent, RoundedCornerShape(3.dp)),
+                        Modifier.size(15.dp).background(fill, HEATMAP_CELL_SHAPE)
+                            .border(1.dp, if (inRange && !available) colors.border else Color.Transparent, HEATMAP_CELL_SHAPE),
                         contentAlignment = Alignment.Center
                     ) {
                         if (available && day?.complete == false) {

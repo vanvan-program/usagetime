@@ -1,25 +1,32 @@
 package dev.usagetime.app
 
+import android.content.ClipData
+import android.content.Context
+import android.content.SharedPreferences
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.ClipEntry
+import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import dev.usagetime.app.sync.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+
+private val SYNC_STATUS_FORMATTER = DateTimeFormatter.ofPattern("M/d HH:mm")
 
 @Composable
 internal fun PhoneSyncSettingsCard(showDesktopData: Boolean) {
     val context = LocalContext.current
-    val clipboard = LocalClipboardManager.current
+    val clipboard = LocalClipboard.current
     var error by remember { mutableStateOf<String?>(null) }
     val initial = remember {
         runCatching { PhoneSyncSettings(context).load() }.getOrElse {
@@ -34,21 +41,29 @@ internal fun PhoneSyncSettingsCard(showDesktopData: Boolean) {
     var desktopStatus by remember { mutableStateOf("") }
     var pulling by remember { mutableStateOf(false) }
     val scope = androidx.compose.runtime.rememberCoroutineScope()
-    LaunchedEffect(showDesktopData) {
-        while (true) {
-            val prefs = context.getSharedPreferences("phone-sync-status", android.content.Context.MODE_PRIVATE)
-            val last = prefs.getLong("lastSuccess", 0)
-            status = (prefs.getString("message", "尚未同步") ?: "尚未同步") +
-                if (last > 0) "\n上次成功：" + java.time.Instant.ofEpochMilli(last).atZone(java.time.ZoneId.systemDefault())
-                    .format(java.time.format.DateTimeFormatter.ofPattern("M/d HH:mm")) else ""
+    DisposableEffect(context, showDesktopData) {
+        val phonePrefs = context.getSharedPreferences("phone-sync-status", Context.MODE_PRIVATE)
+        val desktopPrefs = if (showDesktopData) {
+            context.getSharedPreferences("desktop-sync-status", Context.MODE_PRIVATE)
+        } else null
+        val zone = ZoneId.systemDefault()
+        fun updateStatus() {
+            val last = phonePrefs.getLong("lastSuccess", 0)
+            status = (phonePrefs.getString("message", "尚未同步") ?: "尚未同步") +
+                if (last > 0) "\n上次成功：" + Instant.ofEpochMilli(last).atZone(zone).format(SYNC_STATUS_FORMATTER) else ""
             if (showDesktopData) {
                 val desktopLast = DesktopSync.lastSuccess(context)
                 desktopStatus = DesktopSync.status(context) +
-                    if (desktopLast > 0) " · " + java.time.Instant.ofEpochMilli(desktopLast)
-                        .atZone(java.time.ZoneId.systemDefault())
-                        .format(java.time.format.DateTimeFormatter.ofPattern("M/d HH:mm")) else ""
+                    if (desktopLast > 0) " · " + Instant.ofEpochMilli(desktopLast).atZone(zone).format(SYNC_STATUS_FORMATTER) else ""
             }
-            delay(2000)
+        }
+        updateStatus()
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ -> updateStatus() }
+        phonePrefs.registerOnSharedPreferenceChangeListener(listener)
+        desktopPrefs?.registerOnSharedPreferenceChangeListener(listener)
+        onDispose {
+            phonePrefs.unregisterOnSharedPreferenceChangeListener(listener)
+            desktopPrefs?.unregisterOnSharedPreferenceChangeListener(listener)
         }
     }
     HindsightCard {
@@ -86,7 +101,9 @@ internal fun PhoneSyncSettingsCard(showDesktopData: Boolean) {
                         .onFailure { error = it.message }
                 }) { Text(if (saved) "已保存" else "保存配置") }
                 TextButton(onClick = {
-                    clipboard.setText(AnnotatedString(config.pairingKey))
+                    scope.launch {
+                        clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("pairingKey", config.pairingKey)))
+                    }
                 }) { Text("复制配对码") }
             }
             Button(enabled = saved && config.enabled, onClick = { PhoneSyncSettings.now(context) }) { Text("立即同步") }

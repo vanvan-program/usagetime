@@ -62,11 +62,12 @@ data class MonthMeasure(val monthStart:Long,val monthEnd:Long,val app:String?,va
         FROM daily_usage d WHERE d.zone=:zone AND d.metric=:metric AND d.algorithm=3
           AND d.dayStart>=:start AND d.dayStart<:end AND d.app IS NOT NULL
           AND d.app NOT IN ('__QUALITY_SUMMARY__','__CONFIRMED_COVERAGE__')
+          AND (:selected IS NULL OR d.app=:selected)
         GROUP BY d.app ORDER BY MIN(d.dayStart),
           (SELECT rowid FROM daily_usage f WHERE f.zone=:zone AND f.metric=:metric AND f.algorithm=3
             AND f.dayStart>=:start AND f.dayStart<:end AND f.app=d.app ORDER BY f.dayStart,f.rowid LIMIT 1)
     """)
-    suspend fun dailyAppTotals(start:Long,end:Long,zone:String,metric:String):List<AppAggregate>
+    suspend fun dailyAppTotals(start:Long,end:Long,zone:String,metric:String,selected:String?):List<AppAggregate>
     @Query("SELECT dayStart,dayEnd,app,evidence,millis,provisionalMillis FROM daily_usage WHERE zone=:zone AND metric=:metric AND algorithm=3 AND dayStart>=:start AND dayStart<:end ORDER BY dayStart")
     suspend fun dailyRange(start:Long,end:Long,zone:String,metric:String):List<DayMeasure>
     @Query("SELECT monthStart,monthEnd,app,evidence,millis,provisionalMillis,recordedDays FROM month_usage WHERE zone=:zone AND metric=:metric AND algorithm=3 AND monthStart>=:start AND monthStart<:end ORDER BY monthStart")
@@ -171,10 +172,19 @@ object DualCodec {
         require(normalized.length<=100000){"备份字段过长"}
         return normalized
     }
+    private val hexDigits="0123456789abcdef".toCharArray()
+    private val sha256=object:ThreadLocal<MessageDigest>(){
+        override fun initialValue():MessageDigest=MessageDigest.getInstance("SHA-256")
+    }
     fun hash(text:String):String {
-        val digits="0123456789abcdef"
-        val digest=MessageDigest.getInstance("SHA-256").digest(text.toByteArray(Charsets.UTF_8))
-        return buildString(64){digest.forEach{b->val n=b.toInt() and 255;append(digits[n ushr 4]);append(digits[n and 15])}}
+        val digest=sha256.get()!!.apply{reset()}.digest(text.toByteArray(Charsets.UTF_8))
+        val out=CharArray(digest.size*2)
+        for(i in digest.indices){
+            val n=digest[i].toInt() and 255
+            out[i*2]=hexDigits[n ushr 4]
+            out[i*2+1]=hexDigits[n and 15]
+        }
+        return String(out)
     }
     fun event(time:Long,signal:Signal,app:String="",activity:String="",instance:String?=null,source:EvidenceSource=EvidenceSource.USAGE_EVENTS,zone:String)=StoredEvent(hash(listOf(time,signal,app,activity,instance,source).joinToString("|")),time,signal.name,app,activity,instance,source.name,zone)
     fun stored(s:UsageSlice,algorithm:Int=2):StoredSlice{
