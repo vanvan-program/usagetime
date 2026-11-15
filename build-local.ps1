@@ -89,7 +89,7 @@ if (!$SkipBuild) {
     if (Test-Path -LiteralPath $apk) { Remove-Item -LiteralPath $apk -Force }
     $tasks = @(':core:compileTestKotlin', ':app:compileDebugUnitTestKotlin', ":app:assemble$Variant", ':app:lintDebug')
     if ($CheckRelease) {
-        $tasks += @(':app:compileDebugAndroidTestKotlin', ':app:minifyReleaseWithR8')
+        $tasks += @(':app:compileDebugAndroidTestKotlin', ':app:assembleRelease')
     }
     $gradleArgs = @($tasks) + @('--console=plain')
     if ($Offline) { $gradleArgs += '--offline' }
