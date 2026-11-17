@@ -286,4 +286,19 @@ class IncrementalSyncTest {
    checkLayer(g,metric,if(metric==UsageMetric.PRIMARY)10L else 50L)
   }
  }}
+ @Test fun healthySyncShrinksOverlapAndKeepsUntouchedHistoryCached()=runBlocking{fixture{store,_->
+  val base=System.currentTimeMillis()-600000;var wall=base+100;var elapsed=1000L
+  val raw=events(base).toMutableList();val windows=mutableListOf<Long>()
+  store.useSyntheticSourceForTests({a,b,_->windows+=a;raw.asSequence().filter{it.time>=a&&it.time<b}},{ClockSample(wall,elapsed,"fixture-boot")})
+  store.collect()
+  val firstStart=windows.minOrNull()?:error("no query recorded")
+  assertTrue("first query should look back about 7 days",firstStart<=base-6*86400000L)
+  val z=java.time.ZoneId.of("UTC");val histW=Window(base-5*86400000L,base-4*86400000L)
+  suspend fun histReport()=store.aggregate(histW,z,Grain.DAY,UsageMetric.PRIMARY,"fixture.a")
+  val cachedReport=histReport();assertSame("report must be cached so the assertion is meaningful",cachedReport,histReport())
+  windows.clear();wall+=60000;elapsed+=60000;store.collect()
+  val healthyStart=windows.minOrNull()?:error("no query recorded")
+  assertTrue("healthy overlap should be minutes, not days",healthyStart>=base-40*60000L)
+  assertSame("untouched historical report must survive an incremental sync",cachedReport,histReport())
+ }}
 }

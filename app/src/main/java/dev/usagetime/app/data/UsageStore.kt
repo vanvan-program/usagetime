@@ -107,6 +107,15 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
     // Clear memory cache under mutex before writes; bump UI revision only after the write commits.
     private fun clearReportCache(){reportCache.clear()}
     private fun publishReportRevision(){reportCache.clear();revision.value=revision.value+1}
+    /** Drop only reports whose window can include data at or after [from]; untouched history stays cached. */
+    private fun invalidateReportsFrom(from:Long){
+        reportCache.invalidateWhere{it.window.end>from}
+        revision.value=revision.value+1
+    }
+    private fun continuityHealthy()=preferences.getBoolean("sync-healthy",false)
+    private fun setContinuityHealthy(value:Boolean){preferences.edit{putBoolean("sync-healthy",value)}}
+    private fun lastDeepSweep()=preferences.getLong("last-deep-sweep",0L)
+    private fun markDeepSweep(at:Long){preferences.edit{putLong("last-deep-sweep",at)}}
     private suspend fun cachedReport(key:ReportKey,build:suspend ()->UsageReport):UsageReport=
         withContext(Dispatchers.IO){mutex.withLock{
             reportCache[key]?:build().also{currentCoroutineContext().ensureActive();reportCache.put(key,it)}
@@ -577,6 +586,7 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         }
         if(!permitted()){
             preferences.edit { putBoolean("interrupted",true) }
+            setContinuityHealthy(false)
             log(System.currentTimeMillis(),"PERMISSION_DENIED","Usage access unavailable; continuity not assumed")
             // Pending local evidence does not need platform access; finish it even without permission.
             processPendingInsideLock()
@@ -592,15 +602,20 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         val clockReference=savedQuery?.let{ClockSample(it.end,it.elapsed,it.boot,it.uncertainty)}?:DualCodec.decodeClock(dual.collectionClock())?:latest?.let{ClockSample(it.wall,it.elapsed,it.boot)}
         val clock=clockReference?.let{ClockDiagnosis.inspect(it,sample)}
         if(now<=(latest?.time?:-1)||now<(savedQuery?.end?:-1)){
+            setContinuityHealthy(false)
             log(now,"WALL_CLOCK_BACKWARD","Sync quarantined, saved history unchanged")
             return@withLock "设备时间早于上次记录；本次未写入使用时长"
         }
         val interrupted=preferences.getBoolean("interrupted",false)
-        val queryStart=maxOf(0,if(latest==null)now-7*day else maxOf(latest.time-2*day,now-7*day))
+        // Adaptive overlap: healthy continuity uses a minutes-scale window; anomalies or a due deep
+        // sweep fall back to the conservative 2-day budget. First collection still looks back 7 days.
+        val deepSweepDue=now-lastDeepSweep()>=QueryOverlap.DEEP_SWEEP_INTERVAL_MS
+        val healthyContinuity=continuityHealthy()
+        val usedDeepQuery=latest==null||!healthyContinuity||deepSweepDue
+        val queryStart=QueryOverlap.queryStart(now,latest?.time,healthyContinuity,deepSweepDue)
         val homes=launcherPackages()
         var queryMs=0L
         val timings=SyncTimings()
-        clearReportCache()
         var rawCount=0L;var hasLifecycle=false;var earliestNew:Long?=null
         val observedApps=linkedSetOf<String>()
         try{
@@ -639,6 +654,7 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         }catch(e:kotlinx.coroutines.CancellationException){throw e}
         catch(e:Exception){
             // Committed pending boundaries survive this rollback; finish them locally without platform access.
+            setContinuityHealthy(false)
             try{processPendingInsideLock()}catch(cancel:kotlinx.coroutines.CancellationException){throw cancel}
             catch(local:Exception){throw SyncUnavailable("系统查询失败，本地待算仍保留：${local.message}")}
             throw SyncUnavailable("系统事件查询失败：${e.message?:e.javaClass.simpleName}")
@@ -664,6 +680,7 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         }
         }catch(e:kotlinx.coroutines.CancellationException){throw e}
         catch(e:Exception){
+            setContinuityHealthy(false)
             log(now,"REPLAY_PENDING","Raw events saved; statistics retry pending: ${e.message?.take(200)?:e.javaClass.simpleName}")
             throw SyncUnavailable("原始事件已保存，统计将在下次补记时继续：${e.message?:e.javaClass.simpleName}")
         }
@@ -673,7 +690,9 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         }
         watermark.recordIncremental(modifiedFrom)
         persistWatermark()
-        publishReportRevision()
+        setContinuityHealthy(QueryOverlap.continuityIntact(interrupted,clock!=null,hasLifecycle,latest?.time,now))
+        if(usedDeepQuery)markDeepSweep(now)
+        invalidateReportsFrom(modifiedFrom)
         collectPhaseListener?.invoke("committed")
         if(interrupted)preferences.edit { putBoolean("interrupted",false) }
         val safetyStarted=SystemClock.elapsedRealtime()
@@ -768,13 +787,12 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         val diagnosis=ClockDiagnosis.inspect(ClockSample(boundary.end,boundary.elapsed,boundary.boot,boundary.uncertainty),sample)
         if(diagnosis!=null)log(sample.wall,diagnosis,"Local replay limited to saved acquisition end=${boundary.end}")
         val homes=launcherPackages()
-        clearReportCache()
         val timings=SyncTimings()
         try{
             val modifiedFrom=database.withTransaction{recomputeInsideTransaction(boundary.end,boundary.elapsed,boundary.boot,zone,plan.start,boundary.start,homes,timings,boundary.uncertainty)}
             watermark.recordIncremental(modifiedFrom)
             persistWatermark()
-            publishReportRevision()
+            invalidateReportsFrom(modifiedFrom)
             log(sample.wall,"LOCAL_REPLAY_COMMITTED","local-only replay=${timings.replayStart}..${boundary.end}")
             return "已根据本地事件更新统计"
         }catch(e:kotlinx.coroutines.CancellationException){throw e}

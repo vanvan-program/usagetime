@@ -30,4 +30,14 @@ class ReportCacheTest {
         val cache=ReportCache<String>();listOf("primary","visible","legacy").forEach{cache.put(it,report())}
         cache.clear();assertEquals(0,cache.size);assertEquals(0L,cache.weight);assertNull(cache["legacy"])
     }
+    @Test fun invalidateWhereRemovesOnlyMatchingEntriesAndReleasesWeight(){
+        val cache=ReportCache<String>();cache.put("old",report());cache.put("recent",report());val full=cache.weight
+        val removed=cache.invalidateWhere{it=="recent"}
+        assertEquals(1,removed);assertNotNull(cache["old"]);assertNull(cache["recent"])
+        assertTrue("removed entry's weight must be released",cache.weight<full);assertEquals(1,cache.size)
+    }
+    @Test fun invalidateWhereWithNoMatchKeepsEntriesAndWeight(){
+        val cache=ReportCache<String>();cache.put("a",report());val weight=cache.weight
+        assertEquals(0,cache.invalidateWhere{false});assertEquals(weight,cache.weight);assertNotNull(cache["a"])
+    }
 }

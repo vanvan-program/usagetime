@@ -29,4 +29,26 @@ class ReportCache<K>(private val maxEntries: Int = 12, private val maxWeight: Lo
         }
     }
     fun clear() { entries.clear(); weight = 0; invalidations++ }
+
+    /**
+     * Remove only entries whose key matches [predicate]; untouched entries keep their weight and
+     * recency. Used for incremental invalidation after a sync touches a bounded time range, so
+     * historical reports need no longer be recomputed on every update.
+     * @return number of entries removed.
+     */
+    fun invalidateWhere(predicate: (K) -> Boolean): Int {
+        if (entries.isEmpty()) return 0
+        var removed = 0
+        val iterator = entries.entries.iterator()
+        while (iterator.hasNext()) {
+            val entry = iterator.next()
+            if (predicate(entry.key)) {
+                weight -= entry.value.second
+                iterator.remove()
+                removed++
+            }
+        }
+        if (removed > 0) invalidations++
+        return removed
+    }
 }
