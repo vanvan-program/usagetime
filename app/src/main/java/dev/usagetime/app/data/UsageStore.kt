@@ -226,7 +226,7 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
             day=Dates.midnight(Dates.date(day,zone).plusDays(1),zone)
         }
     }
-    private suspend fun maintainAndSnapshot(force:Boolean=false){
+    private suspend fun maintainAndSnapshot(force:Boolean=false,allowSnapshot:Boolean=true){
         HistoryMaintenanceCoordinator.run(
             prepare={
             val elapsed=SystemClock.elapsedRealtime()
@@ -251,7 +251,10 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
                 }
             },
             recordMaintenance={s->preferences.edit { putLong("maintenance-elapsed",s.elapsed).putInt("maintenance-boot",s.boot) }},
-            snapshot={snapshotInsideLock(force);Unit},
+            // A snapshot checkpoints, closes and gzips the whole database under the caller's mutex.
+            // Interactive collection skips it so opening the app never waits for a 50 MiB copy;
+            // the six-hourly background worker still creates it on the usual 12-hour cadence.
+            snapshot={if(allowSnapshot)snapshotInsideLock(force);Unit},
             warning={e->preferences.edit { putString("safety-warning","安全副本尚未更新：${e.message}") }}
         )
     }
@@ -575,8 +578,13 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
             }
         }
     }
-    /** Phase A persists raw events and the pending replay boundary; phase B recomputes derived rows and can be retried from local evidence alone. */
-    suspend fun collect():String=withContext(Dispatchers.IO){
+    /**
+     * Phase A persists raw events and the pending replay boundary; phase B recomputes derived rows and can be retried from local evidence alone.
+     *
+     * @param foreground the caller is the visible UI and someone is waiting for the result. Housekeeping
+     *   that can take seconds (the gzipped safety copy) is left to the background worker instead.
+     */
+    suspend fun collect(foreground:Boolean=false):String=withContext(Dispatchers.IO){
         val requestedAt=SystemClock.elapsedRealtime()
         mutex.withLock{
         val acquiredAt=SystemClock.elapsedRealtime()
@@ -688,21 +696,23 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
             toPersist.forEach{persistedApps[it.app]=it.label}
             watermark.bumpLabels()
         }
-        watermark.recordIncremental(modifiedFrom)
-        persistWatermark()
+        // A replay that wrote no slice leaves every derived table exactly as the last commit left it,
+        // so neither the watermark nor the report cache needs to move and the UI need not reload.
+        if(modifiedFrom!=null)watermark.recordIncremental(modifiedFrom)
+        if(modifiedFrom!=null||toPersist.isNotEmpty())persistWatermark()
         setContinuityHealthy(QueryOverlap.continuityIntact(interrupted,clock!=null,hasLifecycle,latest?.time,now))
         if(usedDeepQuery)markDeepSweep(now)
-        invalidateReportsFrom(modifiedFrom)
+        if(modifiedFrom!=null)invalidateReportsFrom(modifiedFrom)
         collectPhaseListener?.invoke("committed")
         if(interrupted)preferences.edit { putBoolean("interrupted",false) }
         val safetyStarted=SystemClock.elapsedRealtime()
-        maintainAndSnapshot()
+        maintainAndSnapshot(allowSnapshot=!foreground)
         if(dev.usagetime.app.BuildConfig.DEBUG)android.util.Log.i("UsageTimeSync","complete total_ms=${SystemClock.elapsedRealtime()-requestedAt} wait_ms=${acquiredAt-requestedAt} query_ms=$queryMs replay_ms=${timings.replayMs} summary_ms=${timings.summaryMs} safety_ms=${SystemClock.elapsedRealtime()-safetyStarted} replay_span_ms=${timings.replaySpan}")
         "已保存最新记录"
     }}
     private class SyncTimings{var replayMs=0L;var summaryMs=0L;var replaySpan=0L;var replayStart=0L}
-    /** Replay saved evidence from requestedStart and rebuild hour/day/month summaries inside the caller's transaction. */
-    private suspend fun recomputeInsideTransaction(now:Long,elapsed:Long,boot:String,zone:ZoneId,requestedStart:Long,cutCandidate:Long,homes:Set<String>,timings:SyncTimings,clockUncertainty:Long=0):Long{
+    /** Replay saved evidence from requestedStart and rebuild hour/day/month summaries inside the caller's transaction. Returns null when nothing derived changed. */
+    private suspend fun recomputeInsideTransaction(now:Long,elapsed:Long,boot:String,zone:ZoneId,requestedStart:Long,cutCandidate:Long,homes:Set<String>,timings:SyncTimings,clockUncertainty:Long=0):Long?{
         val previousEnd=dual.latest()?.time
         require(previousEnd==null||now>=previousEnd){"重放终点不能早于已处理边界"}
         val anchor=dual.checkpoint(requestedStart)
@@ -712,21 +722,22 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         val initial=anchor?.let{DualCodec.decode(it.state)}?:EngineState()
         val cut=cutCandidate.coerceIn(start,now)
         // Forward-only collection appends to the existing checkpoint; only a rewind replaces history.
-        if(previousEnd!=null&&start<previousEnd){
+        val rewound=previousEnd!=null&&start<previousEnd
+        if(rewound){
             dual.deleteRecent(start);dual.deleteCheckpointsAfter(start)
         }
-        // A changed replay domain invalidates both caches and every durable day it can touch.
-        HistoryRetention.invalidate(database,Dates.midnight(Dates.date(start,zone),zone))
         collectPhaseListener?.invoke("stats")
         var at=start
         var state=initial
         var earliestClosure:Long?=null
+        var wroteSlices=false
         // Bound live event/interval objects to one civil day; keep the commit atomic.
         while(at<now){
             currentCoroutineContext().ensureActive();ensureWriteSpace()
             val midnight=Dates.midnight(Dates.date(at,zone).plusDays(1),zone)
             val next=minOf(now,midnight,at+6*3_600_000L,if(at<cut)cut else now)
             val result=DualUsageEngine.parse(dual.events(at,next).map{it.event()},Window(at,next),state,homes)
+            if(result.slices.isNotEmpty())wroteSlices=true
             result.slices.chunked(1000).forEach{batch->dual.slices(batch.map{DualCodec.stored(it)})}
             applyClosures(result.closures)?.let{earliestClosure=minOf(earliestClosure?:it,it)}
             state=result.checkpoint
@@ -736,7 +747,16 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
             at=next
         }
         timings.replayMs=SystemClock.elapsedRealtime()-replayStarted
+        // Nothing entered usage_intervals: the summaries committed last round are still exact.
+        if(!SummaryRebuild.needed(wroteSlices,earliestClosure,rewound)){
+            timings.summaryMs=0
+            finishReplay(now)
+            dual.checkpoint(SyncCheckpoint(-4,DualCodec.encodeClock(ClockSample(now,elapsed,boot,clockUncertainty)),0,-1,"","",0))
+            return null
+        }
         val summariesStarted=SystemClock.elapsedRealtime()
+        // A changed replay domain invalidates both caches and every durable day it can touch.
+        HistoryRetention.invalidate(database,Dates.midnight(Dates.date(start,zone),zone))
         val hourStart=java.time.Instant.ofEpochMilli(start).atZone(zone).withMinute(0).withSecond(0).withNano(0).toInstant().toEpochMilli()
         val dayStart=Dates.midnight(Dates.date(start,zone),zone)
         val monthStart=Dates.midnight(Dates.date(start,zone).withDayOfMonth(1),zone)
@@ -790,10 +810,13 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         val timings=SyncTimings()
         try{
             val modifiedFrom=database.withTransaction{recomputeInsideTransaction(boundary.end,boundary.elapsed,boundary.boot,zone,plan.start,boundary.start,homes,timings,boundary.uncertainty)}
-            watermark.recordIncremental(modifiedFrom)
-            persistWatermark()
-            invalidateReportsFrom(modifiedFrom)
-            log(sample.wall,"LOCAL_REPLAY_COMMITTED","local-only replay=${timings.replayStart}..${boundary.end}")
+            log(sample.wall,"LOCAL_REPLAY_COMMITTED","local-only replay=${timings.replayStart}..${boundary.end}; changed=${modifiedFrom!=null}")
+            // The pending boundary is cleared either way; only a real change may touch reports.
+            modifiedFrom?.let{
+                watermark.recordIncremental(it)
+                persistWatermark()
+                invalidateReportsFrom(it)
+            }
             return "已根据本地事件更新统计"
         }catch(e:kotlinx.coroutines.CancellationException){throw e}
         catch(e:Exception){

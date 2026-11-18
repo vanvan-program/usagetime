@@ -189,7 +189,7 @@ class UsageModel(application:Application,val store:dev.usagetime.app.data.UsageS
             runCatching{store.ensureNamesLoaded()}
             reload()
             reportRequests.join()
-            try{if(!demo){val text=store.collect();if(permitted&&recording&&text!="已保存最新记录")message=text}}
+            try{if(!demo){val text=store.collect(foreground=true);if(permitted&&recording&&text!="已保存最新记录")message=text}}
             catch(e:CancellationException){throw e}
             catch(e:Exception){syncError="补记失败：${e.message?:e.javaClass.simpleName}";message=syncError}
             finally{
