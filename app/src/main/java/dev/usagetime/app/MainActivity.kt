@@ -6,6 +6,7 @@ import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.ReportDrawnWhen
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -241,7 +242,8 @@ fun UsageApp(model: UsageModel = viewModel(), widgetNavigation: WidgetNavigation
         }
     }
 
-    DisposableEffect(lifecycle) {
+    DisposableEffect(lifecycle, model) {
+        // Adding the observer to an already resumed Activity delivers the initial ON_RESUME too.
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) model.refresh()
         }
@@ -272,6 +274,32 @@ fun UsageApp(model: UsageModel = viewModel(), widgetNavigation: WidgetNavigation
 
         val s = model.selection
         val rendered = model.display
+        ReportDrawnWhen {
+            model.display.report != null || model.loadError != null || model.selection.page >= 3
+        }
+        val openUsageAccess = { context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) }
+        val showDiagnostics: () -> Unit = {
+            scope.launch {
+                try {
+                    val cache = model.store.reportCacheStats()
+                    val summary = UsagePresentation.diagnosticsSummary(
+                        lastLoadMillis = model.lastLoadMillis,
+                        lastCpuDrawMillis = model.lastCpuDrawMillis,
+                        hits = cache.hits,
+                        misses = cache.misses,
+                        entries = cache.entries,
+                        estimatedBytes = cache.estimatedBytes
+                    )
+                    diagnosticText = (listOf(summary) + model.store.diagnostics().map {
+                        "${it.time} ${it.code}\n${it.detail}"
+                    }).joinToString("\n\n")
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    model.message = "诊断暂时无法读取：${e.message}"
+                }
+            }
+        }
         val navigation = listOf(
             Triple(0, "总览", AppIcons.QueryStats),
             Triple(1, "应用", AppIcons.Apps),
@@ -347,7 +375,7 @@ fun UsageApp(model: UsageModel = viewModel(), widgetNavigation: WidgetNavigation
                             when {
                                 s.page == 3 -> SettingsScreen(
                                     model = model,
-                                    onPermission = { context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) },
+                                    onPermission = openUsageAccess,
                                     onExport = { export.launch("用时记备份_${Dates.date(model.now, model.zone)}.json") },
                                     onImport = {
                                         import.launch(
@@ -361,28 +389,7 @@ fun UsageApp(model: UsageModel = viewModel(), widgetNavigation: WidgetNavigation
                                         )
                                     },
                                     onCsv = { csv.launch("用时记报表_${Dates.date(model.now, model.zone)}.csv") },
-                                    onDiagnostics = {
-                                        scope.launch {
-                                            try {
-                                                val cache = model.store.reportCacheStats()
-                                                val summary = UsagePresentation.diagnosticsSummary(
-                                                    lastLoadMillis = model.lastLoadMillis,
-                                                    lastCpuDrawMillis = model.lastCpuDrawMillis,
-                                                    hits = cache.hits,
-                                                    misses = cache.misses,
-                                                    entries = cache.entries,
-                                                    estimatedBytes = cache.estimatedBytes
-                                                )
-                                                diagnosticText = (listOf(summary) + model.store.diagnostics().map {
-                                                    "${it.time} ${it.code}\n${it.detail}"
-                                                }).joinToString("\n\n")
-                                            } catch (e: CancellationException) {
-                                                throw e
-                                            } catch (e: Exception) {
-                                                model.message = "诊断暂时无法读取，请查看数据安全与占用：${e.message}"
-                                            }
-                                        }
-                                    },
+                                    onDiagnostics = showDiagnostics,
                                     onRebuild = model::rebuildHistory,
                                     onSafety = {
                                         model.updateSafetyInfo()
@@ -393,12 +400,11 @@ fun UsageApp(model: UsageModel = viewModel(), widgetNavigation: WidgetNavigation
                                     }
                                 )
                                 s.page == 5 && model.showDesktopData -> DesktopUsageScreen()
-                                !model.permitted && !model.demo && model.display.first == null -> PermissionScreen(model) {
-                                    context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
-                                }
+                                !model.permitted && !model.demo && model.display.first == null ->
+                                    PermissionScreen(model, onGrant = openUsageAccess)
                                 s.page == 4 -> InsightsScreen(model)
                                 s.page == 2 -> CompareScreen(model)
-                                else -> StatisticsScreen(model)
+                                else -> StatisticsScreen(model, openUsageAccess, showDiagnostics)
                             }
                         }
                     }

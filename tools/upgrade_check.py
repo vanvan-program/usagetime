@@ -108,8 +108,30 @@ def main(arguments):
     if f"package:{PACKAGE}" in existing and not arguments.reuse_qa_install:
         raise ValueError("The QA package already exists; explicitly pass --reuse-qa-install on this disposable AVD.")
     install_flags = ["-r", "-d"] if arguments.reuse_qa_install else ["-r"]
+    if arguments.root_adb:
+        adb(serial, "root")
+        adb(serial, "wait-for-device")
+        if adb(serial, "shell", "id", "-u").strip() != b"0":
+            raise RuntimeError("Use a root-capable system image on the isolated upgrade emulator.")
     adb(serial, "install", *install_flags, str(arguments.old_apk.resolve()))
     adb(serial, "shell", "am", "force-stop", PACKAGE)
+    app_root = f"/data/user/0/{PACKAGE}" if arguments.root_adb else "."
+    as_app = () if arguments.root_adb else ("run-as", PACKAGE)
+    databases = f"{app_root}/databases"
+    shared_prefs = f"{app_root}/shared_prefs"
+    device_database = f"{databases}/usage-history.db"
+    owner = adb(serial, "shell", "stat", "-c", "%u:%g", app_root).decode().strip() if arguments.root_adb else None
+
+    def put_private(source, destination):
+        adb(serial, "shell", *as_app, "cp", source, destination)
+        if owner is not None:
+            adb(serial, "shell", "chown", owner, destination)
+            adb(serial, "shell", "chmod", "600", destination)
+            adb(serial, "shell", "restorecon", destination)
+
+    def read_private(path):
+        return adb(serial, "exec-out", *as_app, "cat", path)
+
     preferences = {
         "usage-settings": (
             '<map><boolean name="recording" value="false"/>'
@@ -125,10 +147,13 @@ def main(arguments):
         remote = f"/data/local/tmp/usagetime-upgrade-{uuid.uuid4().hex}"
         adb(serial, "push", str(database.resolve()), remote + ".db")
         adb(serial, "shell", "chmod", "644", remote + ".db")
-        adb(serial, "shell", "run-as", PACKAGE, "mkdir", "-p", "databases", "shared_prefs")
-        adb(serial, "shell", "run-as", PACKAGE, "rm", "-f",
-            "databases/usage-history.db-wal", "databases/usage-history.db-shm")
-        adb(serial, "shell", "run-as", PACKAGE, "cp", remote + ".db", "databases/usage-history.db")
+        adb(serial, "shell", *as_app, "mkdir", "-p", databases, shared_prefs)
+        if owner is not None:
+            adb(serial, "shell", "chown", owner, databases, shared_prefs)
+            adb(serial, "shell", "chmod", "700", databases, shared_prefs)
+            adb(serial, "shell", "restorecon", databases, shared_prefs)
+        adb(serial, "shell", *as_app, "rm", "-f", device_database + "-wal", device_database + "-shm")
+        put_private(remote + ".db", device_database)
         adb(serial, "shell", "rm", "-f", remote + ".db")
         for name, contents in preferences.items():
             preferences_path = Path(temporary) / f"{name}.xml"
@@ -136,9 +161,9 @@ def main(arguments):
             remote_preferences = f"{remote}-{name}.xml"
             adb(serial, "push", str(preferences_path.resolve()), remote_preferences)
             adb(serial, "shell", "chmod", "644", remote_preferences)
-            adb(serial, "shell", "run-as", PACKAGE, "cp", remote_preferences, f"shared_prefs/{name}.xml")
+            put_private(remote_preferences, f"{shared_prefs}/{name}.xml")
             adb(serial, "shell", "rm", "-f", remote_preferences)
-        transferred = adb(serial, "exec-out", "run-as", PACKAGE, "cat", "databases/usage-history.db")
+        transferred = read_private(device_database)
         if transferred != database.read_bytes():
             raise AssertionError("Synthetic fixture transfer was not byte-for-byte identical.")
         old = adb(serial, "shell", "dumpsys", "package", PACKAGE).decode()
@@ -146,7 +171,7 @@ def main(arguments):
         wait_started(serial)
         time.sleep(2)
         adb(serial, "shell", "am", "force-stop", PACKAGE)
-        database.write_bytes(adb(serial, "exec-out", "run-as", PACKAGE, "cat", "databases/usage-history.db"))
+        database.write_bytes(read_private(device_database))
         if fingerprint(database) != expected:
             raise AssertionError("The old APK did not preserve/read the synthetic fixture.")
         began = time.monotonic()
@@ -159,12 +184,12 @@ def main(arguments):
         if "读取记录失败" in ui or "校验失败" in ui:
             raise AssertionError("The upgraded app displayed a history read error.")
         adb(serial, "shell", "am", "force-stop", PACKAGE)
-        database.write_bytes(adb(serial, "exec-out", "run-as", PACKAGE, "cat", "databases/usage-history.db"))
+        database.write_bytes(read_private(device_database))
         actual = fingerprint(database)
         if actual != expected:
             raise AssertionError("Synthetic history changed during the APK upgrade.")
         for name, contents in preferences.items():
-            saved = read_preferences(adb(serial, "exec-out", "run-as", PACKAGE, "cat", f"shared_prefs/{name}.xml"))
+            saved = read_preferences(read_private(f"{shared_prefs}/{name}.xml"))
             if any(saved.get(key) != value for key, value in read_preferences(contents).items()):
                 raise AssertionError(f"Preferences in {name} were lost during the APK upgrade.")
         current = adb(serial, "shell", "dumpsys", "package", PACKAGE).decode()
@@ -187,4 +212,5 @@ if __name__ == "__main__":
     parser.add_argument("--new-apk", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--reuse-qa-install", action="store_true")
+    parser.add_argument("--root-adb", action="store_true", help="Read fixtures on a disposable AVD when the APK is non-debuggable.")
     main(parser.parse_args())

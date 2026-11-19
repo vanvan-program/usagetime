@@ -3,6 +3,7 @@ package dev.usagetime.app
 import dev.usagetime.core.AppTotal
 import dev.usagetime.core.Dates
 import dev.usagetime.core.Period
+import dev.usagetime.core.UsageReport
 import dev.usagetime.core.Window
 import dev.usagetime.core.durationText
 import java.time.LocalDate
@@ -88,6 +89,21 @@ internal object UsagePresentation {
             sameYearDateFormatter
         }
         return if (start == end) start.format(format) else "${start.format(format)} — ${end.format(format)}"
+    }
+
+    fun lastUnavailableRange(report: UsageReport, firstSaved: Long?, lastSaved: Long?): Window? {
+        if (firstSaved == null || lastSaved == null) return null
+        fun isUnavailable(index: Int): Boolean = report.buckets[index].let { bucket ->
+            !bucket.available && bucket.start >= firstSaved && bucket.end <= lastSaved
+        }
+        val endIndex = report.buckets.indices.lastOrNull(::isUnavailable) ?: return null
+        var firstIndex = endIndex
+        while (firstIndex > 0 && isUnavailable(firstIndex - 1) &&
+            report.buckets[firstIndex - 1].end == report.buckets[firstIndex].start
+        ) {
+            firstIndex--
+        }
+        return Window(report.buckets[firstIndex].start, report.buckets[endIndex].end)
     }
 
     fun percentOf(value: Long, total: Long): String =

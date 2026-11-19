@@ -66,6 +66,75 @@ import java.time.format.DateTimeFormatter
 private val FULL_DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyy年M月d日")
 private val AS_OF_TIME_FORMATTER = DateTimeFormatter.ofPattern("M月d日 HH:mm")
 
+private const val RECORDING_STALE_MS = 12 * 60 * 60 * 1_000L
+
+@Composable
+private fun recordingNotice(
+    model: UsageModel,
+    report: UsageReport?,
+    onGrant: () -> Unit,
+    onDiagnostics: () -> Unit
+): RecordingNotice? {
+    val display = model.display
+    val last = display.last
+    val gap = remember(report, display.first, last, model.computing) {
+        if (report == null || model.computing || last == null) null
+        else UsagePresentation.lastUnavailableRange(report, display.first, minOf(last, report.window.end))
+    }
+    return when {
+        !model.permitted && display.first != null -> RecordingNotice(
+            "使用情况访问已关闭",
+            "重新授权后可以继续保存用时。",
+            "恢复授权",
+            onGrant
+        )
+        !model.recording -> RecordingNotice(
+            "自动补记已暂停",
+            "开启后继续记录近期用时。",
+            "开启自动补记",
+            { model.enableRecording(true) }
+        )
+        last != null && last <= model.now - RECORDING_STALE_MS -> RecordingNotice(
+            "补记已超过 12 小时未更新",
+            "上次保存于 ${Instant.ofEpochMilli(last).atZone(model.zone).format(AS_OF_TIME_FORMATTER)}。",
+            "立即补记",
+            model::refresh,
+            enabled = !model.busy
+        )
+        gap != null -> {
+            val dateTime = DateTimeFormatter.ofPattern("M月d日 HH:mm").withZone(model.zone)
+            val range = if (model.selection.period == Period.TODAY) {
+                "${dateTime.format(Instant.ofEpochMilli(gap.start))} — ${dateTime.format(Instant.ofEpochMilli(gap.end))}"
+            } else {
+                UsagePresentation.windowLabel(gap, model.zone, Dates.date(model.now, model.zone).year)
+            }
+            RecordingNotice("这段时间暂无可用统计", range, "查看采集诊断", onDiagnostics)
+        }
+        else -> null
+    }
+}
+
+@Composable
+private fun OverviewRecordingNotice(notice: RecordingNotice) {
+    val c = hindsightColors()
+    HindsightCard(contentPadding = 14.dp) {
+        StatusDot(notice.title, c.warning)
+        Spacer(Modifier.height(4.dp))
+        Text(notice.detail, style = MaterialTheme.typography.bodySmall, color = c.textMuted)
+        TextButton(onClick = notice.action, enabled = notice.enabled, contentPadding = PaddingValues(0.dp)) {
+            Text(notice.actionLabel)
+        }
+    }
+}
+
+private data class RecordingNotice(
+    val title: String,
+    val detail: String,
+    val actionLabel: String,
+    val action: () -> Unit,
+    val enabled: Boolean = true
+)
+
 internal fun showCustomDateRangePicker(context: Context, model: UsageModel) {
     showDatePicker(context, model.selection.anchor, zone = model.zone) { first ->
         showDatePicker(context, Dates.date(model.now, model.zone), first, zone = model.zone) { last ->
@@ -99,9 +168,14 @@ private fun showDatePicker(
 }
 
 @Composable
-internal fun StatisticsScreen(model: UsageModel) {
+internal fun StatisticsScreen(
+    model: UsageModel,
+    onGrant: () -> Unit,
+    onDiagnostics: () -> Unit
+) {
     val s = model.selection
     val r = model.display.report
+    val notice = if (s.page == 0 && !model.demo) recordingNotice(model, r, onGrant, onDiagnostics) else null
     val listState = rememberLazyListState()
     LaunchedEffect(s.page, s.detail, s.app) {
         listState.scrollToItem(0)
@@ -174,6 +248,8 @@ internal fun StatisticsScreen(model: UsageModel) {
                 }
             }
         }
+
+        notice?.let { item(key = "recording-status") { OverviewRecordingNotice(it) } }
 
         if (model.display.legacyAvailable) {
             item {

@@ -707,7 +707,7 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         if(interrupted)preferences.edit { putBoolean("interrupted",false) }
         val safetyStarted=SystemClock.elapsedRealtime()
         maintainAndSnapshot(allowSnapshot=!foreground)
-        if(dev.usagetime.app.BuildConfig.DEBUG)android.util.Log.i("UsageTimeSync","complete total_ms=${SystemClock.elapsedRealtime()-requestedAt} wait_ms=${acquiredAt-requestedAt} query_ms=$queryMs replay_ms=${timings.replayMs} summary_ms=${timings.summaryMs} safety_ms=${SystemClock.elapsedRealtime()-safetyStarted} replay_span_ms=${timings.replaySpan}")
+        if(dev.usagetime.app.BuildConfig.DEBUG)android.util.Log.i("UsageTimeSync","complete foreground=$foreground total_ms=${SystemClock.elapsedRealtime()-requestedAt} wait_ms=${acquiredAt-requestedAt} query_ms=$queryMs replay_ms=${timings.replayMs} summary_ms=${timings.summaryMs} safety_ms=${SystemClock.elapsedRealtime()-safetyStarted} replay_span_ms=${timings.replaySpan}")
         "已保存最新记录"
     }}
     private class SyncTimings{var replayMs=0L;var summaryMs=0L;var replaySpan=0L;var replayStart=0L}

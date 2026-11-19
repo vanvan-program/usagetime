@@ -1,10 +1,13 @@
 package dev.usagetime.app
 
 import dev.usagetime.core.AppTotal
+import dev.usagetime.core.Bucket
 import dev.usagetime.core.Dates
 import dev.usagetime.core.Period
+import dev.usagetime.core.UsageReport
 import dev.usagetime.core.Window
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.LocalDate
@@ -12,6 +15,18 @@ import java.time.ZoneId
 
 class UsagePresentationTest {
     private val zone = ZoneId.of("Asia/Shanghai")
+
+    @Test fun latestUnavailableRangeExcludesUnrecordedEdgesAndObservedZero() {
+        val buckets = (0L..6L).map { index ->
+            val available = index == 4L
+            Bucket(index * 100, (index + 1) * 100, "", 0, available, available)
+        }
+        val report = UsageReport(Window(0, 700), buckets, emptyList(), 100, false)
+        assertEquals(Window(200, 400), UsagePresentation.lastUnavailableRange(report, 150, 475))
+        assertEquals(Window(500, 600), UsagePresentation.lastUnavailableRange(report, 150, 625))
+        assertNull(UsagePresentation.lastUnavailableRange(report, 400, 550))
+        assertNull(UsagePresentation.lastUnavailableRange(report, null, 625))
+    }
 
     @Test fun filterAndSortAppsMatchesLabelOrPackageAndRespectsSortOrder() {
         val labels = mapOf(

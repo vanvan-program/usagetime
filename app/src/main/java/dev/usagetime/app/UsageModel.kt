@@ -38,7 +38,7 @@ class UsageModel(application:Application,val store:dev.usagetime.app.data.UsageS
         legacy=prefs.getBoolean("widget-legacy",false)));private set
     var display by mutableStateOf(DisplayData());private set
     var demo by mutableStateOf(false);private set
-    var permitted by mutableStateOf(false);private set
+    var permitted by mutableStateOf(store.permitted());private set
     var busy by mutableStateOf(false);private set
     var computing by mutableStateOf(false);private set
     var loadError by mutableStateOf<String?>(null);private set
@@ -84,7 +84,6 @@ class UsageModel(application:Application,val store:dev.usagetime.app.data.UsageS
     }
     init{
         viewModelScope.launch{store.reportRevision.drop(1).collect{if(!demo)reload()}}
-        refresh()
     }
     fun change(update:(Selection)->Selection){
         val previous=selection

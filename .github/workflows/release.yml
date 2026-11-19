@@ -114,7 +114,7 @@ jobs:
           USAGETIME_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           USAGETIME_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           USAGETIME_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: sh gradlew :app:assemblePreview --console=plain
+        run: sh gradlew :app:assembleRelease --console=plain
       - name: Download previous official APK
         env:
           GH_TOKEN: ${{ github.token }}
@@ -123,16 +123,22 @@ jobs:
           test -n "$previous"
           test "$previous" != "$GITHUB_REF_NAME"
           gh release download "$previous" --pattern '*.apk' --dir "$RUNNER_TEMP/previous"
-      - name: Verify signing and version progression
+      - name: Verify release build, signing and version progression
         run: |
           old=$(find "$RUNNER_TEMP/previous" -name '*.apk' -print -quit)
-          new=app/build/outputs/apk/preview/app-preview.apk
+          new=app/build/outputs/apk/release/app-release.apk
+          aapt="$ANDROID_HOME/build-tools/37.0.0/aapt"
+          "$aapt" dump badging "$new" > "$RUNNER_TEMP/new-badging"
+          if grep -q '^application-debuggable$' "$RUNNER_TEMP/new-badging"; then
+            echo "::error::The public APK must be non-debuggable."
+            exit 1
+          fi
           signer="$ANDROID_HOME/build-tools/37.0.0/apksigner"
           "$signer" verify --print-certs "$old" | grep 'certificate SHA-256 digest' > "$RUNNER_TEMP/old-cert"
           "$signer" verify --print-certs "$new" | grep 'certificate SHA-256 digest' > "$RUNNER_TEMP/new-cert"
           diff "$RUNNER_TEMP/old-cert" "$RUNNER_TEMP/new-cert"
           old_code=$("$ANDROID_HOME/build-tools/37.0.0/aapt" dump badging "$old" | sed -n "s/.*versionCode='\([0-9]*\)'.*/\1/p" | head -1)
-          new_code=$("$ANDROID_HOME/build-tools/37.0.0/aapt" dump badging "$new" | sed -n "s/.*versionCode='\([0-9]*\)'.*/\1/p" | head -1)
+          new_code=$(sed -n "s/.*versionCode='\([0-9]*\)'.*/\1/p" "$RUNNER_TEMP/new-badging" | head -1)
           test "$new_code" -gt "$old_code"
       - name: Enable emulator hardware acceleration
         run: |
@@ -147,11 +153,12 @@ jobs:
         with:
           api-level: 35
           arch: x86_64
+          target: default
           avd-name: usagetime-qa-release
-          script: python3 tools/upgrade_check.py --serial emulator-5554 --old-apk "$(find "$RUNNER_TEMP/previous" -name '*.apk' -print -quit)" --new-apk app/build/outputs/apk/preview/app-preview.apk --output artifacts/upgrade-check.json
+          script: python3 tools/upgrade_check.py --serial emulator-5554 --root-adb --old-apk "$(find "$RUNNER_TEMP/previous" -name '*.apk' -print -quit)" --new-apk app/build/outputs/apk/release/app-release.apk --output artifacts/upgrade-check.json
       - name: Package audited source and checksums
         run: |
-          python3 tools/release_package.py --apk app/build/outputs/apk/preview/app-preview.apk --output artifacts/release --tag "$GITHUB_REF_NAME"
+          python3 tools/release_package.py --apk app/build/outputs/apk/release/app-release.apk --output artifacts/release --tag "$GITHUB_REF_NAME"
           cp artifacts/upgrade-check.json artifacts/release/
       - name: Publish official latest release
         env:

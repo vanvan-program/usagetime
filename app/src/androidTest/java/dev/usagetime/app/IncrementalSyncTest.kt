@@ -249,7 +249,9 @@ class IncrementalSyncTest {
   val queryStart=progress(name).getJSONObject("queried").getLong("start")
   store.onCollectPhaseForTests(null);wall+=100
   assertEquals("已根据本地事件更新统计",store.retryPendingForTests())
-  assertEquals(base+100,latestTime(name));assertEquals(queryStart,store.first())
+  assertEquals(base+100,latestTime(name))
+  // The overview's first day may come from a midnight archive. Check replayed slices directly.
+  assertEquals(queryStart,store.read(Window(0,base+100)).slices.minOfOrNull{it.start})
   assertEquals(0L,total(store,base,base+1000,UsageMetric.PRIMARY))
  }}
  @Test fun ownEvidenceBeyondAcquisitionRemainsPendingUntilNextQuery()=runBlocking{fixture{store,name->
