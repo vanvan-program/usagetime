@@ -2,6 +2,8 @@ package dev.usagetime.app
 
 import dev.usagetime.app.sync.AppUpdateChecker
 import dev.usagetime.app.sync.UpdateCheckResult
+import dev.usagetime.app.sync.UpdateService
+import dev.usagetime.app.sync.UpdateSourceMode
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -55,6 +57,7 @@ class AppUpdateCheckerTest {
                 {
                   "name": "usagetime-0.4.3.apk",
                   "size": 14155776,
+                  "digest": "sha256:${"ab".repeat(32)}",
                   "browser_download_url": "https://github.com/vanvan-program/usagetime/releases/download/v0.4.3/usagetime-0.4.3.apk"
                 }
               ]
@@ -71,6 +74,7 @@ class AppUpdateCheckerTest {
         assertEquals("https://github.com/vanvan-program/usagetime/releases/tag/v0.4.3", release.releaseUrl)
         assertEquals("usagetime-0.4.3.apk", release.apkName)
         assertEquals(14_155_776L, release.apkSizeBytes)
+        assertEquals("ab".repeat(32), release.apkSha256)
         assertEquals(
             "https://github.com/vanvan-program/usagetime/releases/download/v0.4.3/usagetime-0.4.3.apk",
             release.apkUrl
@@ -170,6 +174,36 @@ class AppUpdateCheckerTest {
             }
         }
         assertTrue(oversizedError.message?.contains("过大") == true)
+    }
+
+    @Test fun mirrorWithoutCurrentReleaseFallsBackToOfficial() = runBlocking {
+        val official = UpdateCheckResult.UpToDate("0.4.6", AppUpdateChecker.RELEASES_WEB_URL)
+        val failures = listOf(
+            UpdateCheckResult.NoReleaseYet,
+            UpdateCheckResult.UpToDate("0.4.5", AppUpdateChecker.RELEASES_WEB_URL)
+        )
+        for (failure in failures) {
+            val sources = mutableListOf<String>()
+            val result = UpdateService.checkLatest("0.4.6", UpdateSourceMode.MIRROR, onSource = {
+                sources += it.id
+            }) { _, url ->
+                if (url == AppUpdateChecker.LATEST_RELEASE_API_URL) official else failure
+            }
+            assertEquals(official, result)
+            assertEquals(listOf("gh-proxy", "github"), sources)
+        }
+    }
+
+    @Test fun malformedMetadataTriggersMirrorFallback() = runBlocking {
+        val sources = mutableListOf<String>()
+        val result = UpdateService.checkLatest("0.4.5", UpdateSourceMode.AUTO, onSource = {
+            sources += it.id
+        }) { current, url ->
+            val json = if (url == AppUpdateChecker.LATEST_RELEASE_API_URL) "{}" else """{"tag_name":"v0.4.6"}"""
+            AppUpdateChecker.parseLatestReleaseJson(current, json)
+        }
+        assertTrue(result is UpdateCheckResult.UpdateAvailable)
+        assertEquals(listOf("github", "gh-proxy"), sources)
     }
 
     private fun withSingleHttpResponse(

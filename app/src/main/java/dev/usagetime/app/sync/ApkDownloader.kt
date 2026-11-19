@@ -13,6 +13,9 @@ import java.io.IOException
 import java.net.ConnectException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLException
 
@@ -63,7 +66,7 @@ internal object ApkDownloader {
         val candidates = UpdateMirrors.downloadCandidates(source, mode)
             .filter { (_, url) -> UpdateMirrors.isAllowedDownloadUrl(url) }
         val target = targetFile(context, release.apkName, release.versionName)
-        return downloadTo(target, candidates, release.apkSizeBytes, client, onState)
+        return downloadTo(target, candidates, release.apkSizeBytes, client, release.apkSha256, onState)
     }
 
     /**
@@ -77,6 +80,7 @@ internal object ApkDownloader {
         candidates: List<Pair<UpdateMirror, String>>,
         expectedSize: Long?,
         client: OkHttpClient = defaultClient,
+        expectedSha256: String? = null,
         onState: (UpdateDownloadState) -> Unit
     ): File = withContext(Dispatchers.IO) {
         val attempts = mutableListOf<String>()
@@ -91,25 +95,29 @@ internal object ApkDownloader {
                     attemptCount = candidates.size
                 )
             )
-            val partial = File(file.parentFile, file.name + ".part")
             try {
-                if (partial.exists()) partial.delete()
-                streamTo(url, partial, expectedSize, mirror, index, candidates.size, client, onState)
-                onState(UpdateDownloadState.Verifying)
-                validateApk(partial, expectedSize)
-                if (file.exists()) file.delete()
-                if (!partial.renameTo(file)) {
-                    partial.copyTo(file, overwrite = true)
+                val partial = File.createTempFile("update-", ".part", file.absoluteFile.parentFile)
+                try {
+                    val digest = expectedSha256?.let { MessageDigest.getInstance("SHA-256") }
+                    streamTo(url, partial, expectedSize, mirror, index, candidates.size, client, digest, onState)
+                    currentCoroutineContext().ensureActive()
+                    onState(UpdateDownloadState.Verifying)
+                    validateApk(partial, expectedSize)
+                    if (digest != null) {
+                        val sha256 = digest.digest().joinToString("") { "%02x".format(it) }
+                        check(sha256.equals(expectedSha256, ignoreCase = true)) { "安装包校验值与发布信息不一致" }
+                    }
+                    Files.move(partial.toPath(), file.toPath(), StandardCopyOption.ATOMIC_MOVE)
+                } finally {
                     partial.delete()
                 }
                 val size = file.length()
                 onState(UpdateDownloadState.Ready(file, size))
                 return@withContext file
             } catch (cancelled: CancellationException) {
-                partial.delete()
                 throw cancelled
             } catch (error: Exception) {
-                partial.delete()
+                currentCoroutineContext().ensureActive()
                 attempts += "${mirror.label}：${friendlyError(error)}"
             }
         }
@@ -118,7 +126,7 @@ internal object ApkDownloader {
         throw UpdateDownloadException(message, attempts)
     }
 
-    private fun streamTo(
+    private suspend fun streamTo(
         url: String,
         partial: File,
         expectedSize: Long?,
@@ -126,8 +134,10 @@ internal object ApkDownloader {
         index: Int,
         attemptCount: Int,
         client: OkHttpClient,
+        digest: MessageDigest?,
         onState: (UpdateDownloadState) -> Unit
     ) {
+        val downloadContext = currentCoroutineContext()
         val request = Request.Builder()
             .url(url)
             .header("User-Agent", "UsageTime-Update")
@@ -149,11 +159,13 @@ internal object ApkDownloader {
                 partial.outputStream().use { output ->
                     val buffer = ByteArray(BUFFER_BYTES)
                     while (true) {
+                        downloadContext.ensureActive()
                         val count = input.read(buffer)
                         if (count < 0) break
                         read += count
                         if (read > MAX_APK_BYTES) throw IOException("安装包超过大小上限")
                         output.write(buffer, 0, count)
+                        digest?.update(buffer, 0, count)
                         val now = System.currentTimeMillis()
                         if (now - lastEmit >= PROGRESS_INTERVAL_MS || (total != null && read >= total)) {
                             lastEmit = now

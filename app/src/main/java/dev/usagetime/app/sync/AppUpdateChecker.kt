@@ -1,5 +1,6 @@
 package dev.usagetime.app.sync
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.Call
 import okhttp3.Callback
@@ -28,7 +29,8 @@ internal data class AppUpdateInfo(
     val apkUrl: String?,
     val apkName: String?,
     val apkSizeBytes: Long?,
-    val publishedAt: String?
+    val publishedAt: String?,
+    val apkSha256: String?
 )
 
 internal sealed class UpdateCheckResult {
@@ -75,6 +77,40 @@ internal data class ParsedVersion(
     }
 }
 
+/** Tries the selected sources in order and reports the source for each attempt. */
+internal object UpdateService {
+    suspend fun checkLatest(
+        currentVersion: String,
+        mode: UpdateSourceMode,
+        onSource: (UpdateMirror) -> Unit = {},
+        fetch: suspend (String, String) -> UpdateCheckResult = { version, url ->
+            AppUpdateChecker.checkLatestReleaseSuspend(version, apiUrl = url)
+        }
+    ): UpdateCheckResult {
+        var lastError: Exception? = null
+        for ((source, url) in UpdateMirrors.apiCandidates(mode)) {
+            onSource(source)
+            try {
+                val result = fetch(currentVersion, url)
+                if (source != UpdateMirrors.OFFICIAL) {
+                    check(result != UpdateCheckResult.NoReleaseYet) { "未返回正式版本信息" }
+                    if (result is UpdateCheckResult.UpToDate) {
+                        check(!AppUpdateChecker.isNewerVersion(currentVersion, result.latestVersion)) {
+                            "返回的版本低于当前版本"
+                        }
+                    }
+                }
+                return result
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                lastError = error
+            }
+        }
+        throw lastError ?: IllegalStateException("没有可用的更新源")
+    }
+}
+
 /**
  * Checks GitHub Releases for newer app versions without requiring a dedicated update server.
  * Network calls happen only when explicitly invoked by the caller.
@@ -89,6 +125,7 @@ internal object AppUpdateChecker {
 
     internal const val MAX_RESPONSE_BYTES = 512 * 1024
     private const val MAX_NOTES_CHARS = 4000
+    private val SHA256_DIGEST = Regex("sha256:([0-9a-fA-F]{64})")
     private val VERSION_PATTERN =
         Regex("""^[vV]?(\d+(?:\.\d+)*)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$""")
 
@@ -169,7 +206,7 @@ internal object AppUpdateChecker {
                 throw IllegalStateException("GitHub API 访问次数达到上限，请稍后再试或前往 Releases 页面查看")
             }
         }
-        check(res.isSuccessful) { "GitHub 响应异常（HTTP $code）" }
+        check(res.isSuccessful) { "版本查询失败（HTTP $code）" }
         val body = res.body ?: error("GitHub 返回内容为空")
         val contentLength = body.contentLength()
         check(contentLength <= maxResponseBytes) { "GitHub 返回内容过大" }
@@ -186,7 +223,7 @@ internal object AppUpdateChecker {
             return UpdateCheckResult.NoReleaseYet
         }
         val tagName = optNonNullString(root, "tag_name")?.trim().orEmpty()
-        val latestVersion = parseVersion(tagName) ?: return UpdateCheckResult.NoReleaseYet
+        val latestVersion = checkNotNull(parseVersion(tagName)) { "返回的版本号无效" }
         val displayVersion = tagName.removePrefix("v").removePrefix("V")
         val releaseUrl = optNonNullString(root, "html_url")
             ?.trim()
@@ -210,17 +247,20 @@ internal object AppUpdateChecker {
                 title = title,
                 notes = notes,
                 releaseUrl = releaseUrl,
-                apkUrl = apkAsset?.first,
-                apkName = apkAsset?.second,
-                apkSizeBytes = apkAsset?.third,
-                publishedAt = publishedAt
+                apkUrl = apkAsset?.url,
+                apkName = apkAsset?.name,
+                apkSizeBytes = apkAsset?.size,
+                publishedAt = publishedAt,
+                apkSha256 = apkAsset?.sha256
             )
         )
     }
 
-    private fun selectApkAsset(root: JSONObject): Triple<String, String, Long?>? {
+    private data class ApkAsset(val url: String, val name: String, val size: Long?, val sha256: String?)
+
+    private fun selectApkAsset(root: JSONObject): ApkAsset? {
         val assets = root.optJSONArray("assets") ?: return null
-        var fallback: Triple<String, String, Long?>? = null
+        var fallback: ApkAsset? = null
         for (index in 0 until assets.length()) {
             val asset = assets.optJSONObject(index) ?: continue
             val name = optNonNullString(asset, "name")?.trim().orEmpty()
@@ -229,7 +269,8 @@ internal object AppUpdateChecker {
                 continue
             }
             val size = asset.optLong("size", -1L).takeIf { it > 0L }
-            val candidate = Triple(url, name, size)
+            val sha256 = optNonNullString(asset, "digest")?.let { SHA256_DIGEST.matchEntire(it)?.groupValues?.get(1) }
+            val candidate = ApkAsset(url, name, size, sha256)
             if (name.startsWith("usagetime-", ignoreCase = true)) {
                 return candidate
             }
@@ -287,10 +328,10 @@ internal object AppUpdateChecker {
     }
 
     internal fun friendlyErrorMessage(error: Throwable): String = when (error) {
-        is SocketTimeoutException -> "连接 GitHub 超时，请稍后再试"
-        is UnknownHostException, is ConnectException -> "无法连接 GitHub，请检查当前网络"
-        is SSLException -> "GitHub 安全连接失败，请检查网络环境"
-        is JSONException -> "GitHub 返回的版本信息格式异常"
+        is SocketTimeoutException -> "连接超时，请稍后再试"
+        is UnknownHostException, is ConnectException -> "无法连接，请检查当前网络"
+        is SSLException -> "安全连接失败，请检查网络环境"
+        is JSONException -> "返回的版本信息格式异常"
         is IllegalStateException -> error.message?.takeIf { it.isNotBlank() } ?: "检查更新失败，请稍后重试"
         else -> "检查更新失败，请稍后重试"
     }

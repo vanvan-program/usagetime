@@ -58,21 +58,3 @@ internal object UpdateInstaller {
         }
     }
 }
-
-/** Tries the release API through the configured sources and returns the first valid answer. */
-internal object UpdateService {
-    suspend fun checkLatest(currentVersion: String, mode: UpdateSourceMode): UpdateCheckResult {
-        val candidates = UpdateMirrors.apiCandidates(mode)
-        var lastError: Exception? = null
-        for ((_, apiUrl) in candidates) {
-            try {
-                return AppUpdateChecker.checkLatestReleaseSuspend(currentVersion, apiUrl = apiUrl)
-            } catch (cancelled: kotlinx.coroutines.CancellationException) {
-                throw cancelled
-            } catch (error: Exception) {
-                lastError = error
-            }
-        }
-        throw lastError ?: IllegalStateException("检查更新失败，请稍后重试")
-    }
-}

@@ -6,17 +6,10 @@ import java.io.File
 import java.net.URI
 import java.util.Locale
 
-/**
- * Where the app is allowed to fetch update metadata and APK files from.
- *
- * GitHub's release hosts are unreachable from some mainland networks; the domestic entries are
- * public read-only GitHub proxies that forward the same path. They are only download helpers:
- * the version decision and the package signature are still made locally.
- */
-internal enum class UpdateSourceMode(val key: String, val label: String, val shortLabel: String) {
-    AUTO("auto", "自动（GitHub 官方 → 国内镜像）", "自动"),
-    MIRROR("mirror", "国内镜像优先", "国内镜像"),
-    GITHUB("github", "仅 GitHub 官方", "仅 GitHub");
+internal enum class UpdateSourceMode(val key: String, val label: String, val description: String) {
+    AUTO("auto", "自动（推荐）", "优先通过 GitHub 官方检查和下载，失败时使用镜像。"),
+    MIRROR("mirror", "镜像优先", "优先通过第三方镜像检查和下载，失败时尝试 GitHub 官方。"),
+    GITHUB("github", "仅 GitHub 官方", "检查和下载均通过 GitHub 官方。");
 
     companion object {
         fun fromKey(key: String?): UpdateSourceMode = entries.firstOrNull { it.key == key } ?: AUTO
@@ -27,46 +20,33 @@ internal data class UpdateMirror(val id: String, val label: String, val proxyPre
 
 internal object UpdateMirrors {
     val OFFICIAL = UpdateMirror("github", "GitHub 官方", null)
+    private val apiMirror = UpdateMirror("gh-proxy", "gh-proxy.com", "https://gh-proxy.com/")
 
-    /** Public GitHub proxies commonly reachable from mainland China. */
-    val DOMESTIC: List<UpdateMirror> = listOf(
+    // ghfast.top and ghproxy.net serve release assets but reject GitHub's release API.
+    private val downloadMirrors = listOf(
+        apiMirror,
         UpdateMirror("ghfast", "ghfast.top", "https://ghfast.top/"),
-        UpdateMirror("ghproxy-net", "ghproxy.net", "https://ghproxy.net/"),
-        UpdateMirror("gh-proxy", "gh-proxy.com", "https://gh-proxy.com/"),
-        UpdateMirror("moeyy", "moeyy.xyz", "https://github.moeyy.xyz/")
+        UpdateMirror("ghproxy-net", "ghproxy.net", "https://ghproxy.net/")
     )
+    private val proxyHosts = downloadMirrors.mapNotNull { it.proxyPrefix?.let { prefix -> URI(prefix).host } }.toSet()
 
-    val ALL: List<UpdateMirror> = listOf(OFFICIAL) + DOMESTIC
+    fun downloadCandidates(target: String, mode: UpdateSourceMode): List<Pair<UpdateMirror, String>> =
+        candidates(target, mode, downloadMirrors)
 
-    private const val MAX_DOWNLOAD_ATTEMPTS = 5
+    fun apiCandidates(mode: UpdateSourceMode): List<Pair<UpdateMirror, String>> =
+        candidates(AppUpdateChecker.LATEST_RELEASE_API_URL, mode, listOf(apiMirror))
 
-    fun proxyHosts(): Set<String> = DOMESTIC.mapNotNull { mirror ->
-        mirror.proxyPrefix?.let { prefix -> runCatching { URI(prefix).host?.lowercase() }.getOrNull() }
-    }.toSet()
-
-    fun downloadUrl(target: String, mirror: UpdateMirror): String =
-        mirror.proxyPrefix?.let { prefix -> prefix + target } ?: target
-
-    /** Ordered APK download candidates for [target]; mirrors are derived from the same GitHub URL. */
-    fun downloadCandidates(target: String, mode: UpdateSourceMode): List<Pair<UpdateMirror, String>> {
+    private fun candidates(
+        target: String,
+        mode: UpdateSourceMode,
+        mirrors: List<UpdateMirror>
+    ): List<Pair<UpdateMirror, String>> {
         val ordered = when (mode) {
             UpdateSourceMode.GITHUB -> listOf(OFFICIAL)
-            UpdateSourceMode.MIRROR -> DOMESTIC
-            UpdateSourceMode.AUTO -> ALL
+            UpdateSourceMode.MIRROR -> mirrors + OFFICIAL
+            UpdateSourceMode.AUTO -> listOf(OFFICIAL) + mirrors
         }
-        return ordered.take(MAX_DOWNLOAD_ATTEMPTS).map { mirror -> mirror to downloadUrl(target, mirror) }
-    }
-
-    /** Ordered release-metadata candidates; proxies forward the api.github.com path. */
-    fun apiCandidates(mode: UpdateSourceMode): List<Pair<UpdateMirror, String>> {
-        val api = AppUpdateChecker.LATEST_RELEASE_API_URL
-        val ordered = when (mode) {
-            UpdateSourceMode.GITHUB -> listOf(OFFICIAL)
-            UpdateSourceMode.MIRROR -> DOMESTIC
-            // Trying every proxy for the API would be slow; two fallbacks are enough.
-            UpdateSourceMode.AUTO -> listOf(OFFICIAL) + DOMESTIC.take(2)
-        }
-        return ordered.map { mirror -> mirror to downloadUrl(api, mirror) }
+        return ordered.map { mirror -> mirror to (mirror.proxyPrefix.orEmpty() + target) }
     }
 
     fun isAllowedDownloadUrl(raw: String): Boolean {
@@ -77,17 +57,9 @@ internal object UpdateMirrors {
         if (uri.scheme?.lowercase() != "https") return false
         if (uri.userInfo != null) return false
         if (uri.port != -1 && uri.port != 443) return false
-        val host = uri.host?.lowercase() ?: return false
-        return proxyHosts().any { allowed -> host == allowed || host.endsWith(".$allowed") }
-    }
-
-    fun describeCandidates(mode: UpdateSourceMode): String = when (mode) {
-        UpdateSourceMode.AUTO -> "GitHub 官方，失败后依次尝试 " + DOMESTIC.joinToString("、") { it.label }
-        UpdateSourceMode.MIRROR -> "依次尝试 " + DOMESTIC.joinToString("、") { it.label }
-        UpdateSourceMode.GITHUB -> "仅尝试 GitHub 官方下载地址"
+        return uri.host?.lowercase() in proxyHosts
     }
 }
-
 internal data class DownloadProgress(val bytesRead: Long, val totalBytes: Long?) {
     val fraction: Float?
         get() = totalBytes?.takeIf { it > 0L }

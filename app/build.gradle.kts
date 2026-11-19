@@ -10,8 +10,20 @@ android {
         applicationId = "dev.usagetime.app"
         minSdk = 29
         targetSdk = 36
-        versionCode = 35
-        versionName = "0.4.6"
+        versionCode = 36
+        versionName = "0.4.7"
+        val currentVersion = requireNotNull(versionName)
+        val updateNotes = providers.fileContents(rootProject.layout.projectDirectory.file("CHANGELOG.md"))
+            .asText.get().lineSequence()
+            .dropWhile { !it.startsWith("## $currentVersion - ") }
+            .drop(1)
+            .takeWhile { !it.startsWith("## ") }
+            .filter { it.startsWith("- ") }
+            .map { it.removePrefix("- ").replace("**", "").replace("`", "") }
+            .joinToString("\n")
+        val javaString = updateNotes.replace("\\", "\\\\").replace("\"", "\\\"")
+            .replace("\t", "\\t").replace("\n", "\\n")
+        buildConfigField("String", "VERSION_UPDATE_NOTES", "\"$javaString\"")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     buildFeatures { compose = true; buildConfig = true }

@@ -17,6 +17,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
 import java.net.ServerSocket
+import java.security.MessageDigest
 import java.util.Collections
 
 class UpdateDownloadsTest {
@@ -24,26 +25,22 @@ class UpdateDownloadsTest {
         "https://github.com/vanvan-program/usagetime/releases/download/v0.4.4/usagetime-0.4.4.apk"
 
     @Test fun downloadCandidatesFollowModeAndPrefixEveryMirror() {
+        val official = UpdateMirrors.OFFICIAL
         val auto = UpdateMirrors.downloadCandidates(githubApk, UpdateSourceMode.AUTO)
-        assertEquals(UpdateMirrors.ALL.size, auto.size)
-        assertEquals(UpdateMirrors.OFFICIAL, auto.first().first)
+        assertEquals(listOf("github", "gh-proxy", "ghfast", "ghproxy-net"), auto.map { it.first.id })
         assertEquals(githubApk, auto.first().second)
-        assertTrue(auto.drop(1).all { (mirror, url) -> mirror.proxyPrefix != null && url.startsWith(mirror.proxyPrefix) })
+        assertTrue(auto.drop(1).all { (mirror, url) -> url == mirror.proxyPrefix + githubApk })
+        val mirrorFirst = UpdateMirrors.downloadCandidates(githubApk, UpdateSourceMode.MIRROR)
+        assertEquals(auto.drop(1) + auto.first(), mirrorFirst)
+        assertEquals(listOf(official to githubApk), UpdateMirrors.downloadCandidates(githubApk, UpdateSourceMode.GITHUB))
 
         val apiAuto = UpdateMirrors.apiCandidates(UpdateSourceMode.AUTO)
-        assertEquals(UpdateMirrors.OFFICIAL, apiAuto.first().first)
+        assertEquals(listOf("github", "gh-proxy"), apiAuto.map { it.first.id })
         assertTrue(apiAuto.first().second.endsWith("/releases/latest"))
-        assertEquals(3, apiAuto.size)
-
-        val mirrorOnly = UpdateMirrors.downloadCandidates(githubApk, UpdateSourceMode.MIRROR)
-        assertEquals(UpdateMirrors.DOMESTIC, mirrorOnly.map { it.first })
-        assertTrue(mirrorOnly.all { (_, url) -> url != githubApk })
-
-        val githubOnly = UpdateMirrors.downloadCandidates(githubApk, UpdateSourceMode.GITHUB)
-        assertEquals(listOf(UpdateMirrors.OFFICIAL), githubOnly.map { it.first })
-        assertEquals(listOf(githubApk), githubOnly.map { it.second })
+        assertEquals("https://gh-proxy.com/${apiAuto.first().second}", apiAuto.last().second)
+        assertEquals(apiAuto.reversed(), UpdateMirrors.apiCandidates(UpdateSourceMode.MIRROR))
+        assertEquals(apiAuto.take(1), UpdateMirrors.apiCandidates(UpdateSourceMode.GITHUB))
     }
-
     @Test fun allowedDownloadUrlsOnlyTrustGithubAndConfiguredMirrors() {
         assertTrue(UpdateMirrors.isAllowedDownloadUrl(githubApk))
         assertTrue(UpdateMirrors.isAllowedDownloadUrl("https://ghfast.top/$githubApk"))
@@ -96,10 +93,12 @@ class UpdateDownloadsTest {
         }
     }
 
-    @Test fun downloadFallsBackToNextSourceWhenFirstFails() {
+    @Test fun downloadFallsBackOnHttpErrorAndRejectsCorruptionWithMatchingSizeAndHeader() {
         val payload = fakeApk(8 * 1024)
+        val hash = MessageDigest.getInstance("SHA-256").digest(payload).joinToString("") { "%02x".format(it) }
+        val missing = OneShotServer("404 Not Found", byteArrayOf())
+        val corrupt = OneShotServer("200 OK", payload.copyOf().apply { this[lastIndex] = 99 })
         val server = OneShotServer("200 OK", payload)
-        val deadPort = ServerSocket(0).use { it.localPort }
         val directory = tempDirectory()
         try {
             val file = File(directory, "usagetime-fallback.apk")
@@ -108,17 +107,22 @@ class UpdateDownloadsTest {
                 ApkDownloader.downloadTo(
                     file = file,
                     candidates = listOf(
-                        UpdateMirror("bad", "故障源", null) to "http://127.0.0.1:$deadPort/usagetime.apk",
+                        UpdateMirror("bad", "故障源", null) to missing.url("/usagetime.apk"),
+                        UpdateMirror("corrupt", "损坏文件", null) to corrupt.url("/usagetime.apk"),
                         UpdateMirror("good", "可用源", null) to server.url("/usagetime.apk")
                     ),
                     expectedSize = payload.size.toLong(),
                     client = OkHttpClient(),
+                    expectedSha256 = hash,
                     onState = { states.add(it) }
                 )
             }
             assertTrue(result.readBytes().contentEquals(payload))
             assertTrue(states.filterIsInstance<UpdateDownloadState.Running>().any { it.sourceLabel == "可用源" })
+            assertEquals(listOf(file.name), directory.list()!!.toList())
         } finally {
+            missing.close()
+            corrupt.close()
             server.close()
             directory.deleteRecursively()
         }

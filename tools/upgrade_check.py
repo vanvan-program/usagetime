@@ -110,28 +110,34 @@ def main(arguments):
     install_flags = ["-r", "-d"] if arguments.reuse_qa_install else ["-r"]
     adb(serial, "install", *install_flags, str(arguments.old_apk.resolve()))
     adb(serial, "shell", "am", "force-stop", PACKAGE)
-    preferences = (
-        '<?xml version="1.0" encoding="utf-8"?><map>'
-        '<boolean name="recording" value="false"/>'
-        '<boolean name="show-confirmed" value="true"/>'
-        '<string name="theme">dark</string></map>'
-    ).encode()
+    preferences = {
+        "usage-settings": (
+            '<map><boolean name="recording" value="false"/>'
+            '<boolean name="show-confirmed" value="true"/>'
+            '<string name="theme">dark</string></map>'
+        ).encode(),
+        "update-settings": b'<map><string name="source-mode">mirror</string></map>',
+    }
     with tempfile.TemporaryDirectory(prefix="usagetime-upgrade-") as temporary:
         database = Path(temporary) / "fixture.db"
         fixture(database)
         expected = fingerprint(database)
-        preferences_path = Path(temporary) / "settings.xml"
-        preferences_path.write_bytes(preferences)
         remote = f"/data/local/tmp/usagetime-upgrade-{uuid.uuid4().hex}"
         adb(serial, "push", str(database.resolve()), remote + ".db")
-        adb(serial, "push", str(preferences_path.resolve()), remote + ".xml")
-        adb(serial, "shell", "chmod", "644", remote + ".db", remote + ".xml")
+        adb(serial, "shell", "chmod", "644", remote + ".db")
         adb(serial, "shell", "run-as", PACKAGE, "mkdir", "-p", "databases", "shared_prefs")
         adb(serial, "shell", "run-as", PACKAGE, "rm", "-f",
             "databases/usage-history.db-wal", "databases/usage-history.db-shm")
         adb(serial, "shell", "run-as", PACKAGE, "cp", remote + ".db", "databases/usage-history.db")
-        adb(serial, "shell", "run-as", PACKAGE, "cp", remote + ".xml", "shared_prefs/usage-settings.xml")
-        adb(serial, "shell", "rm", "-f", remote + ".db", remote + ".xml")
+        adb(serial, "shell", "rm", "-f", remote + ".db")
+        for name, contents in preferences.items():
+            preferences_path = Path(temporary) / f"{name}.xml"
+            preferences_path.write_bytes(contents)
+            remote_preferences = f"{remote}-{name}.xml"
+            adb(serial, "push", str(preferences_path.resolve()), remote_preferences)
+            adb(serial, "shell", "chmod", "644", remote_preferences)
+            adb(serial, "shell", "run-as", PACKAGE, "cp", remote_preferences, f"shared_prefs/{name}.xml")
+            adb(serial, "shell", "rm", "-f", remote_preferences)
         transferred = adb(serial, "exec-out", "run-as", PACKAGE, "cat", "databases/usage-history.db")
         if transferred != database.read_bytes():
             raise AssertionError("Synthetic fixture transfer was not byte-for-byte identical.")
@@ -157,13 +163,15 @@ def main(arguments):
         actual = fingerprint(database)
         if actual != expected:
             raise AssertionError("Synthetic history changed during the APK upgrade.")
-        saved = read_preferences(adb(serial, "exec-out", "run-as", PACKAGE, "cat", "shared_prefs/usage-settings.xml"))
-        if saved.get("recording") != "false" or saved.get("show-confirmed") != "true" or saved.get("theme") != "dark":
-            raise AssertionError("Preferences were lost during the APK upgrade.")
+        for name, contents in preferences.items():
+            saved = read_preferences(adb(serial, "exec-out", "run-as", PACKAGE, "cat", f"shared_prefs/{name}.xml"))
+            if any(saved.get(key) != value for key, value in read_preferences(contents).items()):
+                raise AssertionError(f"Preferences in {name} were lost during the APK upgrade.")
         current = adb(serial, "shell", "dumpsys", "package", PACKAGE).decode()
         report = {
             "passed": True, "avd": name, "syntheticHistory": actual,
-            "preferencesPreserved": True, "installAndLaunchSeconds": round(time.monotonic() - began, 2),
+            "preferencesPreserved": True, "updateSourcePreserved": True,
+            "installAndLaunchSeconds": round(time.monotonic() - began, 2),
             "oldVersion": next(line.strip() for line in old.splitlines() if "versionName=" in line),
             "newVersion": next(line.strip() for line in current.splitlines() if "versionName=" in line),
         }

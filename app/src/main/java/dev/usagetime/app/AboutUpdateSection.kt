@@ -15,11 +15,14 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -27,10 +30,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
@@ -44,12 +49,12 @@ import dev.usagetime.app.sync.UpdateDownloadException
 import dev.usagetime.app.sync.UpdateDownloadState
 import dev.usagetime.app.sync.UpdateFormatting
 import dev.usagetime.app.sync.UpdateInstaller
-import dev.usagetime.app.sync.UpdateMirrors
 import dev.usagetime.app.sync.UpdatePreferences
 import dev.usagetime.app.sync.UpdateService
 import dev.usagetime.app.sync.UpdateSourceMode
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 internal fun openExternalUrl(
@@ -80,19 +85,26 @@ internal fun AboutUpdateCard(
     val c = hindsightColors()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var showAboutDialog by remember { mutableStateOf(false) }
+    var showAboutDialog by rememberSaveable { mutableStateOf(false) }
+    var showSourceDialog by rememberSaveable { mutableStateOf(false) }
+    var showVersionNotes by rememberSaveable { mutableStateOf(false) }
     var checking by remember { mutableStateOf(false) }
-    var statusText by remember { mutableStateOf("手动点击时检查更新，下载支持国内镜像") }
-    var statusError by remember { mutableStateOf(false) }
+    val checkPrompt = "手动查询最新正式版本"
+    var statusText by remember { mutableStateOf(checkPrompt) }
     var availableRelease by remember { mutableStateOf<AppUpdateInfo?>(null) }
     var dialogRelease by remember { mutableStateOf<AppUpdateInfo?>(null) }
     var sourceMode by remember { mutableStateOf(UpdatePreferences.sourceMode(context)) }
     var downloadState by remember { mutableStateOf<UpdateDownloadState>(UpdateDownloadState.Idle) }
     var downloadJob by remember { mutableStateOf<Job?>(null) }
+    val downloading = downloadState is UpdateDownloadState.Running || downloadState == UpdateDownloadState.Verifying
 
     fun changeSourceMode(mode: UpdateSourceMode) {
-        sourceMode = mode
-        UpdatePreferences.setSourceMode(context, mode)
+        if (mode != sourceMode) {
+            sourceMode = mode
+            UpdatePreferences.setSourceMode(context, mode)
+            statusText = checkPrompt
+        }
+        showSourceDialog = false
     }
 
     fun clearDownload() {
@@ -102,33 +114,39 @@ internal fun AboutUpdateCard(
     }
 
     fun triggerCheck() {
-        if (checking) return
+        if (checking || downloading) return
         clearDownload()
         availableRelease = null
+        checking = true
+        val mode = sourceMode
         scope.launch {
-            checking = true
-            statusError = false
-            statusText = "正在检查更新…"
+            var sourceLabel = mode.label
             try {
-                when (val result = UpdateService.checkLatest(BuildConfig.VERSION_NAME, sourceMode)) {
+                val result = UpdateService.checkLatest(BuildConfig.VERSION_NAME, mode, onSource = { source ->
+                    sourceLabel = source.label
+                    statusText = "正在通过 ${source.label} 检查…"
+                })
+                val summary = when (result) {
                     is UpdateCheckResult.UpdateAvailable -> {
                         availableRelease = result.release
                         dialogRelease = result.release
-                        statusText = "发现新版本 ${result.release.tagName}，点击可再次检查"
+                        "发现新版本 ${result.release.tagName}"
                     }
                     is UpdateCheckResult.UpToDate -> {
-                        statusText = "已是最新版本（v${BuildConfig.VERSION_NAME}）"
-                        onMessage("当前已是最新版本（v${BuildConfig.VERSION_NAME}）")
+                        if (AppUpdateChecker.isNewerVersion(BuildConfig.VERSION_NAME, result.latestVersion)) {
+                            "最新发布 v${result.latestVersion}，低于当前版本"
+                        } else {
+                            "已是最新版本 v${result.latestVersion}"
+                        }
                     }
-                    UpdateCheckResult.NoReleaseYet -> {
-                        statusText = "仓库暂未发布正式版本"
-                    }
+                    UpdateCheckResult.NoReleaseYet -> "仓库暂未发布正式版本"
                 }
+                statusText = "$summary · $sourceLabel"
+                if (result !is UpdateCheckResult.UpdateAvailable) onMessage(summary)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
-                statusError = true
-                val message = AppUpdateChecker.friendlyErrorMessage(error)
+                val message = "$sourceLabel · ${AppUpdateChecker.friendlyErrorMessage(error)}"
                 statusText = message
                 onMessage(message)
             } finally {
@@ -152,7 +170,7 @@ internal fun AboutUpdateCard(
         downloadJob = scope.launch {
             try {
                 ApkDownloader.download(context.applicationContext, release, sourceMode) { state ->
-                    downloadState = state
+                    if (isActive) downloadState = state
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -197,9 +215,22 @@ internal fun AboutUpdateCard(
         )
         HindsightDivider()
         SettingRow(
+            title = "版本更新介绍",
+            subtitle = "查看 v${BuildConfig.VERSION_NAME} 的更新内容",
+            onClick = { showVersionNotes = true }
+        )
+        HindsightDivider()
+        SettingRow(
+            title = "更新源",
+            subtitle = sourceMode.label,
+            enabled = !checking && !downloading,
+            onClick = { showSourceDialog = true }
+        )
+        HindsightDivider()
+        SettingRow(
             title = "检查更新",
             subtitle = statusText,
-            enabled = !checking,
+            enabled = !checking && !downloading,
             onClick = ::triggerCheck,
             trailing = if (checking) {
                 { CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = c.accent) }
@@ -207,14 +238,7 @@ internal fun AboutUpdateCard(
                 null
             }
         )
-        if (statusError) {
-            Text(
-                "仅在手动检查或下载更新时联网；检查或下载失败可重试，也可直接打开 Releases 页面。",
-                style = MaterialTheme.typography.labelSmall,
-                color = c.danger
-            )
-            Spacer(Modifier.height(4.dp))
-        }
+
         availableRelease?.let { release ->
             TextButton(
                 onClick = { dialogRelease = release },
@@ -223,16 +247,7 @@ internal fun AboutUpdateCard(
                 Text("查看并下载新版本 ${release.tagName}", color = c.accent, fontWeight = FontWeight.SemiBold)
             }
         }
-        HindsightDivider()
-        Column(Modifier.padding(vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text("更新下载源", style = MaterialTheme.typography.labelSmall, color = c.textMuted)
-            UpdateSourceChips(mode = sourceMode, onSelect = ::changeSourceMode)
-            Text(
-                UpdateMirrors.describeCandidates(sourceMode),
-                style = MaterialTheme.typography.labelSmall,
-                color = c.textMuted
-            )
-        }
+
         if (dialogRelease == null && downloadState != UpdateDownloadState.Idle) {
             HindsightDivider()
             UpdateDownloadInline(
@@ -284,12 +299,24 @@ internal fun AboutUpdateCard(
         )
     }
 
-    dialogRelease?.let { release ->
+    if (showVersionNotes) {
+        VersionNotesDialog(onDismiss = { showVersionNotes = false })
+    }
+
+    if (showSourceDialog) {
+        UpdateSourceDialog(
+            mode = sourceMode,
+            onSelect = ::changeSourceMode,
+            onDismiss = { showSourceDialog = false }
+        )
+    }
+
+    dialogRelease?.takeUnless { showSourceDialog }?.let { release ->
         UpdateAvailableDialog(
             release = release,
             downloadState = downloadState,
             sourceMode = sourceMode,
-            onSelectSource = ::changeSourceMode,
+            onSelectSource = { showSourceDialog = true },
             onStartDownload = { startDownload(release) },
             onCancelDownload = ::clearDownload,
             onInstall = ::installDownloaded,
@@ -300,29 +327,73 @@ internal fun AboutUpdateCard(
 }
 
 @Composable
-private fun UpdateSourceChips(
+private fun UpdateSourceDialog(
     mode: UpdateSourceMode,
-    onSelect: (UpdateSourceMode) -> Unit
+    onSelect: (UpdateSourceMode) -> Unit,
+    onDismiss: () -> Unit
 ) {
     val c = hindsightColors()
-    Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-        UpdateSourceMode.entries.forEach { option ->
-            val selected = option == mode
-            TextButton(
-                onClick = { onSelect(option) },
-                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
-            ) {
-                Text(
-                    option.shortLabel,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = if (selected) c.accent else c.textMuted,
-                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
-                )
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = c.card,
+        title = { Text("更新源") },
+        text = {
+            Column(Modifier.selectableGroup().verticalScroll(rememberScrollState())) {
+                UpdateSourceMode.entries.forEach { option ->
+                    Row(
+                        Modifier.fillMaxWidth()
+                            .selectable(selected = option == mode, role = Role.RadioButton, onClick = { onSelect(option) })
+                            .heightIn(min = 48.dp)
+                            .padding(vertical = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(selected = option == mode, onClick = null)
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(option.label, style = MaterialTheme.typography.bodyMedium, color = c.textStrong)
+                            Text(option.description, style = MaterialTheme.typography.bodySmall, color = c.textMuted)
+                        }
+                    }
+                }
             }
-        }
-    }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } }
+    )
 }
 
+@Composable
+private fun VersionNotesDialog(onDismiss: () -> Unit) {
+    val c = hindsightColors()
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = c.card,
+        title = { Text("版本更新介绍") },
+        text = {
+            Column(
+                Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    "用时记 v${BuildConfig.VERSION_NAME}",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = c.textStrong
+                )
+                val notes = BuildConfig.VERSION_UPDATE_NOTES
+                if (notes.isBlank()) {
+                    Text("此版本暂无内置更新介绍。", color = c.textMuted)
+                } else {
+                    notes.lineSequence().forEach { note ->
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("•", color = c.textMuted)
+                            Text(note, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, color = c.textRegular)
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } }
+    )
+}
 @Composable
 private fun UpdateDownloadInline(
     state: UpdateDownloadState,
@@ -466,7 +537,7 @@ private fun UpdateAvailableDialog(
     release: AppUpdateInfo,
     downloadState: UpdateDownloadState,
     sourceMode: UpdateSourceMode,
-    onSelectSource: (UpdateSourceMode) -> Unit,
+    onSelectSource: () -> Unit,
     onStartDownload: () -> Unit,
     onCancelDownload: () -> Unit,
     onInstall: () -> Unit,
@@ -502,9 +573,12 @@ private fun UpdateAvailableDialog(
                 publishDate?.let { date ->
                     Text("发布日期：$date", style = MaterialTheme.typography.bodySmall, color = c.textMuted)
                 }
-                if (hasApk) {
-                    Text("下载源", style = MaterialTheme.typography.labelSmall, color = c.textMuted)
-                    UpdateSourceChips(mode = sourceMode, onSelect = onSelectSource)
+                if (hasApk && downloadState !is UpdateDownloadState.Running &&
+                    downloadState != UpdateDownloadState.Verifying
+                ) {
+                    TextButton(onClick = onSelectSource, contentPadding = PaddingValues(0.dp)) {
+                        Text("更新源 · ${sourceMode.label}", color = c.accent)
+                    }
                 }
                 UpdateDownloadBlock(
                     state = downloadState,
@@ -567,7 +641,7 @@ private fun UpdateDownloadBlock(
         UpdateDownloadState.Idle -> {
             if (hasApk) {
                 Text(
-                    "应用内下载完成后会调起系统安装器；失败会自动切换下载源，也可改用浏览器下载。",
+                    "下载完成后，点击「立即安装」打开系统安装器。",
                     style = MaterialTheme.typography.bodySmall,
                     color = c.textMuted
                 )
