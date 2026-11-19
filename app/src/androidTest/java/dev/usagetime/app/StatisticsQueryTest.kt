@@ -1,5 +1,7 @@
 package dev.usagetime.app
 
+import android.os.SystemClock
+import android.util.Log
 import androidx.room.Room
 import androidx.room.withTransaction
 import androidx.test.platform.app.InstrumentationRegistry
@@ -57,7 +59,14 @@ class StatisticsQueryTest {
             store.close()
             val changed=Room.databaseBuilder(context,UsageDatabase::class.java,name).build()
             try{
-                changed.openHelper.writableDatabase.execSQL("DELETE FROM daily_usage WHERE dayStart=? AND app=?",arrayOf<Any?>(slots[130].start,DailyMetrics.SUMMARY))
+                changed.withTransaction {
+                    changed.openHelper.writableDatabase.execSQL("DELETE FROM daily_usage WHERE dayStart=? AND app=?",arrayOf<Any?>(slots[130].start,DailyMetrics.SUMMARY))
+                    // A partial start inside a cached day must be excluded from the app totals.
+                    val day=slots[170]
+                    changed.dual().daily(UsageMetric.entries.map{metric->
+                        DailyUsage(UUID.randomUUID().toString(),day.start+1,day.end,zone.id,metric.name,"fixture.extra",Evidence.INFERRED.name,999,0,3)
+                    })
+                }
             }finally{changed.close()}
             store=UsageStore(context,name)
             verify()
@@ -76,6 +85,53 @@ class StatisticsQueryTest {
             context.deleteDatabase(name)
         }
     }
+    @Test fun partialCacheKeepsDenseHistoryAndAnArchivedDayAccurate():Unit=runBlocking{
+        val context=InstrumentationRegistry.getInstrumentation().targetContext
+        val name="safety-test-statistics-${UUID.randomUUID()}.db"
+        val zone=ZoneId.of("UTC")
+        val start=LocalDate.of(2026,1,1)
+        val window=Window(Dates.midnight(start,zone),Dates.midnight(start.plusDays(128),zone))
+        val metric=UsageMetric.PRIMARY
+        val days=Reports.slots(window,zone,Grain.DAY).map{slot->
+            (0 until 96).map{index->
+                MetricDayCell(slot.start,slot.end,"fixture.app$index",Evidence.INFERRED,1000L+index,0)
+            }+listOf(
+                MetricDayCell(slot.start,slot.end,DailyMetrics.SUMMARY,Evidence.UNKNOWN,slot.duration,0),
+                MetricDayCell(slot.start,slot.end,DailyMetrics.OBSERVED,Evidence.CONFIRMED,0,0)
+            )
+        }
+        val db=Room.databaseBuilder(context,UsageDatabase::class.java,name).build()
+        try{
+            try{
+                db.withTransaction{
+                    days.forEachIndexed{index,cells->
+                        if(index==112){
+                            HistoryRetention.save(db,HistoryRetention.rows(cells,metric,zone),"LOCAL")
+                        }else{
+                            db.dual().daily(cells.map{cell->
+                                DailyUsage("${cell.start}-${cell.app}",cell.start,cell.end,zone.id,metric.name,
+                                    cell.app,cell.evidence.name,cell.millis,cell.provisional,3)
+                            })
+                        }
+                    }
+                }
+            }finally{db.close()}
+            val oracle=DailyMetrics.Accumulator(window,zone,Grain.DAY).also{days.forEach(it::addDay)}.finish()
+            val times=(0 until 9).map{
+                val store=UsageStore(context,name)
+                try{
+                    store.first()
+                    val began=SystemClock.elapsedRealtimeNanos()
+                    val actual=store.aggregate(window,zone,Grain.DAY,metric,null)
+                    val millis=(SystemClock.elapsedRealtimeNanos()-began)/1_000_000.0
+                    assertEquals(oracle,actual)
+                    millis
+                }finally{store.close()}
+            }
+            Log.i("UsageLoadingBench","mixed cache, one warmup plus eight samples ms: ${times.joinToString(",")}")
+        }finally{context.deleteDatabase(name)}
+    }
+
     @Test fun pagesMatchPointQueriesAcrossDstAndImportedEvidenceAndRejectCorruptHistory()=runBlocking{
         val context=InstrumentationRegistry.getInstrumentation().targetContext
         val name="safety-test-statistics-${UUID.randomUUID()}.db"

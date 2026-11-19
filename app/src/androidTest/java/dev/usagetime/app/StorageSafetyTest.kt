@@ -31,10 +31,13 @@ class StorageSafetyTest{
   val w=Window(0,5000);val z=java.time.ZoneId.of("UTC")
   suspend fun report()=store.aggregateLegacy(w,z,dev.usagetime.core.Grain.DAY,null)
   store.importJson(backup("first",1000));val first=report();assertSame(first,report())
-  store.createSafetyCopy();val saved=store.storageInfo().copies.first()
+  store.createSafetyCopy()
   store.importJson(backup("second",3000));val merged=report()
   assertNotSame(first,merged);assertEquals(2,merged.apps.size)
-  store.restoreSafetyCopy(snapshotTime=saved);assertEquals(1,report().apps.size)
+  // Import publishes both pre-import and post-import copies and may prune the manual copy.
+  val copies=store.storageInfo().copies
+  assertEquals(2,copies.size)
+  store.restoreSafetyCopy(snapshotTime=copies.last());assertEquals(1,report().apps.size)
   store.restoreSafetyCopy(true);assertEquals(2,report().apps.size)
  }}
  @Test fun failedImportInvalidatesCacheAndRebuildsRolledBackReport()=runBlocking{fixture{store,_->

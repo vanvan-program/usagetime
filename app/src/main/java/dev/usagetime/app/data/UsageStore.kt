@@ -172,11 +172,11 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
     }
 
     data class StorageInfo(val databaseBytes:Long,val snapshotBytes:Long,val freeBytes:Long,val snapshots:Int,val latest:Long?,val canUndo:Boolean,val warning:String?,val copies:List<Long>,val lastExport:Long?)
-    fun storageInfo():StorageInfo{
+    suspend fun storageInfo():StorageInfo=withContext(Dispatchers.IO){mutex.withLock{
         val copies=recovery.list()
         val dbBytes=databaseFile.parentFile!!.listFiles().orEmpty().filter{it.isFile&&it.name.startsWith(databaseFile.name)}.sumOf{it.length()}
-        return StorageInfo(dbBytes,copies.sumOf{it.file.length()},StatFs(context.filesDir.absolutePath).availableBytes,copies.size,copies.firstOrNull()?.time,recovery.hasRollback(),recoveryIssue?.let{"恢复尚未完成，原文件已保留：$it"}?:preferences.getString("safety-warning",null),copies.map{it.time},preferences.getLong("last-full-export",0).takeIf{it>0})
-    }
+        StorageInfo(dbBytes,copies.sumOf{it.file.length()},StatFs(context.filesDir.absolutePath).availableBytes,copies.size,copies.firstOrNull()?.time,recovery.hasRollback(),recoveryIssue?.let{"恢复尚未完成，原文件已保留：$it"}?:preferences.getString("safety-warning",null),copies.map{it.time},preferences.getLong("last-full-export",0).takeIf{it>0})
+    }}
     fun noteFullExport(){preferences.edit { putLong("last-full-export",System.currentTimeMillis()) }}
     private fun ensureWriteSpace(){
         if(StatFs(context.filesDir.absolutePath).availableBytes<LocalRecovery.RESERVE){
@@ -479,21 +479,37 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         val accumulator=DailyMetrics.Accumulator(window,zone,grain,app,includeConfirmed=includeConfirmed)
         for(page in Reports.slots(window,zone,Grain.DAY).chunked(128)){
             currentCoroutineContext().ensureActive()
-            val from=page.first().start;val until=page.last().end
-            val compact=dual.dailyTotals(from,until,zone.id,metric.name,app,includeConfirmed)
-            // Exact day bounds and one summary are mandatory; archive reads retain digest validation.
-            if(compact.size==page.size&&compact.indices.all{i->
-                compact[i].dayStart==page[i].start&&compact[i].dayEnd==page[i].end&&compact[i].summaries==1&&compact[i].invalidEvidence==0
-            }){
-                compact.forEach{day->accumulator.addDayTotals(Window(day.dayStart,day.dayEnd),
-                    day.value,day.unknown,day.provisional,day.observed,day.positive!=0)}
-                dual.dailyAppTotals(from,until,zone.id,metric.name,app).forEach{row->
-                    accumulator.addAppTotals(row.app,row.confirmed,row.inferred,row.provisional)
+            val compact=dual.dailyTotals(page.first().start,page.last().end,zone.id,metric.name,app,includeConfirmed)
+            var rowIndex=0
+            val cachedDays=page.map{slot->
+                val firstRow=rowIndex
+                while(rowIndex<compact.size&&compact[rowIndex].dayStart<slot.end)rowIndex++
+                // App totals cover contiguous ranges. A surplus row (including a partial day) would pollute that sum.
+                compact.getOrNull(firstRow)?.takeIf{row->
+                    rowIndex==firstRow+1&&row.dayStart==slot.start&&row.dayEnd==slot.end&&
+                        row.summaries==1&&row.invalidEvidence==0
                 }
-            }else{
-                for(slot in page){
-                    currentCoroutineContext().ensureActive()
-                    accumulator.addDay(reader.read(slot))
+            }
+            var dayIndex=0
+            while(dayIndex<page.size){
+                currentCoroutineContext().ensureActive()
+                val firstDay=dayIndex
+                val isCached=cachedDays[firstDay]!=null
+                do{dayIndex++}while(dayIndex<page.size&&(cachedDays[dayIndex]!=null)==isCached)
+                // A fragmented cache can use the existing batched reader without an SQL query per short run.
+                if(!isCached||dayIndex-firstDay<minOf(3,page.size)){
+                    for(index in firstDay until dayIndex){
+                        currentCoroutineContext().ensureActive()
+                        accumulator.addDay(reader.read(page[index]))
+                    }
+                    continue
+                }
+                for(index in firstDay until dayIndex){
+                    val day=checkNotNull(cachedDays[index])
+                    accumulator.addDayTotals(page[index],day.value,day.unknown,day.provisional,day.observed,day.positive!=0)
+                }
+                dual.dailyAppTotals(page[firstDay].start,page[dayIndex-1].end,zone.id,metric.name,app).forEach{row->
+                    accumulator.addAppTotals(row.app,row.confirmed,row.inferred,row.provisional)
                 }
             }
         }

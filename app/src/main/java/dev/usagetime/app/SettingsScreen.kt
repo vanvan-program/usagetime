@@ -20,6 +20,7 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -49,6 +50,9 @@ internal fun SettingsScreen(
     onCompressedExport: () -> Unit
 ) {
     val c = hindsightColors()
+    LaunchedEffect(model, model.demo) {
+        if (!model.demo) model.updateSafetyInfo()
+    }
     Column(
         Modifier
             .fillMaxSize()
@@ -159,7 +163,7 @@ internal fun SettingsScreen(
                 onClick = onSafety,
                 enabled = !model.demo
             )
-            model.safetyInfo.warning?.let {
+            model.safetyInfo?.warning?.let {
                 Text(it, style = MaterialTheme.typography.labelSmall, color = c.danger)
             }
             HindsightDivider()
@@ -278,6 +282,20 @@ internal fun StorageSafetyDialog(model: UsageModel, onDismiss: () -> Unit) {
     var action by remember { mutableStateOf<Int?>(null) }
     var selectedTime by remember { mutableStateOf<Long?>(null) }
     val info = model.safetyInfo
+    if (info == null) {
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text("数据安全与占用") },
+            text = { Text(if (model.safetyInfoLoadFailed) "暂时无法读取存储情况。" else "正在读取存储情况…") },
+            confirmButton = {
+                if (model.safetyInfoLoadFailed) {
+                    TextButton(onClick = model::updateSafetyInfo) { Text("重试") }
+                }
+            },
+            dismissButton = { TextButton(onClick = onDismiss) { Text("关闭") } }
+        )
+        return
+    }
     fun size(bytes: Long) = "%.1f MB".format(bytes / 1048576.0)
     val date = info.latest?.let {
         Instant.ofEpochMilli(it).atZone(model.zone).format(COPY_SHORT_FORMATTER)

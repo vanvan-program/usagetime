@@ -30,7 +30,9 @@ class UsageModel(application:Application,val store:dev.usagetime.app.data.UsageS
     var insightsError by mutableStateOf<String?>(null);private set
     private var insightJob:Job?=null
     private var insightGeneration=0
-    var safetyInfo by mutableStateOf(store.storageInfo());private set
+    var safetyInfo by mutableStateOf<dev.usagetime.app.data.UsageStore.StorageInfo?>(null);private set
+    var safetyInfoLoadFailed by mutableStateOf(false);private set
+    private var safetyInfoJob:Job?=null
     private val initialDate=Dates.date(wallClock(),ZoneId.systemDefault())
     var selection by mutableStateOf(Selection(
         anchor=initialDate,compareA=initialDate,compareB=initialDate.minusWeeks(1),
@@ -195,7 +197,7 @@ class UsageModel(application:Application,val store:dev.usagetime.app.data.UsageS
                 val afterPermitted=store.permitted()
                 val revisionChanged=store.reportRevision.value!=beforeRevision
                 val permissionChanged=afterPermitted!=beforePermitted
-                now=wallClock();busy=false;permitted=afterPermitted;safetyInfo=store.storageInfo()
+                now=wallClock();busy=false;permitted=afterPermitted
                 if(permissionChanged&&!revisionChanged)reload()
                 if(!demo&&(revisionChanged||permissionChanged))UsageWidgetProvider.requestUpdate(getApplication())
             }
@@ -203,9 +205,18 @@ class UsageModel(application:Application,val store:dev.usagetime.app.data.UsageS
     }
     fun rebuildHistory(){
         if(refreshJob?.isActive==true)return
-        refreshJob=viewModelScope.launch{busy=true;try{message=store.rebuildHistory();reload()}catch(e:CancellationException){throw e}catch(e:Exception){message="重算失败，原数据已回滚：${e.message}"}finally{busy=false;safetyInfo=store.storageInfo()}}
+        refreshJob=viewModelScope.launch{busy=true;try{message=store.rebuildHistory();reload()}catch(e:CancellationException){throw e}catch(e:Exception){message="重算失败，原数据已回滚：${e.message}"}finally{busy=false;updateSafetyInfo()}}
     }
-    fun updateSafetyInfo(){safetyInfo=store.storageInfo()}
+    fun updateSafetyInfo(){
+        safetyInfoJob?.cancel()
+        safetyInfo=null
+        safetyInfoLoadFailed=false
+        safetyInfoJob=viewModelScope.launch{
+            try{safetyInfo=store.storageInfo()}
+            catch(cancelled:CancellationException){throw cancelled}
+            catch(_:Exception){safetyInfoLoadFailed=true}
+        }
+    }
     fun fullBackupExported(){store.noteFullExport();updateSafetyInfo()}
     fun safetyAction(action:Int,snapshotTime:Long?=null){
         if(refreshJob?.isActive==true)return
@@ -216,7 +227,7 @@ class UsageModel(application:Application,val store:dev.usagetime.app.data.UsageS
                 store.loadNames();now=wallClock();reload()
             }catch(e:CancellationException){throw e}
             catch(e:Exception){message="数据安全操作未完成：${e.message}"}
-            finally{busy=false;safetyInfo=store.storageInfo()}
+            finally{busy=false;updateSafetyInfo()}
         }
     }
     fun period(value:Period){change{it.copy(period=value,anchor=Dates.date(wallClock(),ZoneId.systemDefault()),grain=Grain.MONTH)}}
