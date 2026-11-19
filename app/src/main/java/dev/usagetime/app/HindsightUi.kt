@@ -243,37 +243,30 @@ fun appAccent(index: Int): Color {
 }
 
 @Composable
-fun HindsightBackdrop(content: @Composable () -> Unit) {
+fun HindsightBackdrop(decorated: Boolean = true, content: @Composable () -> Unit) {
     val c = hindsightColors()
-    Box(
-        Modifier
-            .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    0f to c.accentSoft.copy(alpha = if (c.dark) 0.45f else 0.62f),
-                    0.25f to c.canvas,
-                    1f to c.canvas
-                )
+    val background = if (decorated) {
+        Modifier.background(
+            Brush.verticalGradient(
+                0f to c.accentSoft.copy(alpha = if (c.dark) 0.45f else 0.62f),
+                0.25f to c.canvas,
+                1f to c.canvas
             )
-    ) { content() }
+        )
+    } else Modifier.background(c.canvas)
+    Box(Modifier.fillMaxSize().then(background)) { content() }
 }
 
 @Composable
-fun BrandMark(size: Dp = 36.dp) {
+fun BrandMark(size: Dp = 36.dp, decorated: Boolean = true) {
+    val shape = RoundedCornerShape(size * 0.3f)
+    val background = if (decorated) {
+        Modifier.shadow(8.dp, shape, clip = false).clip(shape).background(
+            Brush.linearGradient(listOf(Color(0xFF9B8DF8), Color(0xFFF07FA5), Color(0xFFFFB17E)))
+        )
+    } else Modifier.background(Color(0xFF9B8DF8), shape)
     Box(
-        Modifier
-            .size(size)
-            .shadow(8.dp, RoundedCornerShape(size * 0.3f), clip = false)
-            .clip(RoundedCornerShape(size * 0.3f))
-            .background(
-                Brush.linearGradient(
-                    listOf(
-                        Color(0xFF9B8DF8),
-                        Color(0xFFF07FA5),
-                        Color(0xFFFFB17E)
-                    )
-                )
-            ),
+        Modifier.size(size).then(background),
         contentAlignment = Alignment.Center
     ) {
         Icon(

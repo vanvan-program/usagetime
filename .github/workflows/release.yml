@@ -122,6 +122,10 @@ jobs:
           previous=$(gh release list --exclude-drafts --exclude-pre-releases --json tagName --jq '.[0].tagName')
           test -n "$previous"
           test "$previous" != "$GITHUB_REF_NAME"
+          if [ "$GITHUB_REF_NAME" = v0.4.10 ] && [ "$previous" != v0.4.9 ]; then
+            echo "::error::v0.4.10 must be cover-installed over the v0.4.9 official release."
+            exit 1
+          fi
           gh release download "$previous" --pattern '*.apk' --dir "$RUNNER_TEMP/previous"
       - name: Verify release build, signing and version progression
         run: |

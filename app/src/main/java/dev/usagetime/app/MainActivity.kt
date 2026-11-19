@@ -7,10 +7,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.ReportDrawnWhen
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -31,10 +29,12 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithContent
@@ -52,10 +52,8 @@ import dev.usagetime.core.Dates
 import dev.usagetime.core.Period
 import dev.usagetime.core.Signal
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     private val observationId = java.util.UUID.randomUUID().toString()
@@ -139,6 +137,7 @@ data class WidgetNavigation(val page: Int, val app: String?, val week: Boolean, 
 fun UsageApp(model: UsageModel = viewModel(), widgetNavigation: WidgetNavigation? = null) {
     var safetyDialog by remember { mutableStateOf(false) }
     var diagnosticText by remember { mutableStateOf<String?>(null) }
+    var backupDocumentsOpened by rememberSaveable { mutableStateOf(false) }
     val context = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
@@ -177,70 +176,11 @@ fun UsageApp(model: UsageModel = viewModel(), widgetNavigation: WidgetNavigation
         )
     }
 
-    val export = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
-        if (uri != null) scope.launch {
-            BackupDocumentCoordinator.exportBackup(
-                write = {
-                    withContext(Dispatchers.IO) {
-                        context.contentResolver.openOutputStream(uri)?.use { model.store.writeBackup(it) }
-                            ?: error("无法写入文件")
-                    }
-                },
-                markExported = model::fullBackupExported,
-                message = { model.message = it },
-                success = "备份已导出",
-                failurePrefix = "导出失败："
-            )
-        }
-    }
-    val compressedExport = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/gzip")) { uri ->
-        if (uri != null) scope.launch {
-            BackupDocumentCoordinator.exportBackup(
-                write = {
-                    withContext(Dispatchers.IO) {
-                        context.contentResolver.openOutputStream(uri)?.use { model.store.writeCompressedBackup(it) }
-                            ?: error("无法写入文件")
-                    }
-                },
-                markExported = model::fullBackupExported,
-                message = { model.message = it },
-                success = "压缩完整备份已导出",
-                failurePrefix = "导出未完成，请保留此前副本："
-            )
-        }
-    }
-    val csv = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { uri ->
-        if (uri != null) scope.launch {
-            try {
-                val snapshot = model.exportReport()
-                withContext(Dispatchers.IO) {
-                    val body = CsvReportFormat.build(snapshot, model::label)
-                    context.contentResolver.openOutputStream(uri)?.use { it.write(body.toByteArray()) }
-                        ?: error("无法写入文件")
-                }
-                model.message = "报表已导出"
-            } catch (e: Exception) {
-                model.message = "导出失败：${e.message}"
-            }
-        }
-    }
-    val import = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) scope.launch {
-            BackupDocumentCoordinator.importBackup(
-                read = {
-                    withContext(Dispatchers.IO) {
-                        context.contentResolver.openInputStream(uri)?.use { model.store.importBackup(it) }
-                            ?: error("无法读取文件")
-                    }
-                },
-                loadNames = { model.store.loadNames() },
-                updateSafety = model::updateSafetyInfo,
-                useDemo = model::useDemo,
-                reload = model::reload,
-                message = { model.message = it }
-            )
-        }
-    }
+    val backupDocuments = if (model.selection.page == 3 || backupDocumentsOpened) {
+        // Keep pending picker results registered across tab changes and activity recreation.
+        if (!backupDocumentsOpened) SideEffect { backupDocumentsOpened = true }
+        rememberBackupDocuments(model)
+    } else null
 
     DisposableEffect(lifecycle, model) {
         // Adding the observer to an already resumed Activity delivers the initial ON_RESUME too.
@@ -274,6 +214,8 @@ fun UsageApp(model: UsageModel = viewModel(), widgetNavigation: WidgetNavigation
 
         val s = model.selection
         val rendered = model.display
+        val loadingOverview = s.page == 0 && model.permitted &&
+            rendered.report == null && model.loadError == null
         ReportDrawnWhen {
             model.display.report != null || model.loadError != null || model.selection.page >= 3
         }
@@ -300,19 +242,20 @@ fun UsageApp(model: UsageModel = viewModel(), widgetNavigation: WidgetNavigation
                 }
             }
         }
-        val navigation = listOf(
-            Triple(0, "总览", AppIcons.QueryStats),
-            Triple(1, "应用", AppIcons.Apps),
-            Triple(2, "对比", AppIcons.BarChart),
-            Triple(4, "分析", AppIcons.CalendarMonth),
-            Triple(5, "电脑", AppIcons.Computer),
-            Triple(3, "设置", Icons.Outlined.Settings)
-        ).filter { it.first != 5 || model.showDesktopData }
-        val navPages = navigation.map { it.first }
-        val navItems = navigation.map { it.second }
-        val navIcons = navigation.map { it.third }
+        val showDesktopData = model.showDesktopData
+        val (navPages, navItems, navIcons) = remember(showDesktopData) {
+            val entries = buildList {
+                add(Triple(0, "总览", AppIcons.QueryStats))
+                add(Triple(1, "应用", AppIcons.Apps))
+                add(Triple(2, "对比", AppIcons.BarChart))
+                add(Triple(4, "分析", AppIcons.CalendarMonth))
+                if (showDesktopData) add(Triple(5, "电脑", AppIcons.Computer))
+                add(Triple(3, "设置", Icons.Outlined.Settings))
+            }
+            Triple(entries.map { it.first }, entries.map { it.second }, entries.map { it.third })
+        }
 
-        HindsightBackdrop {
+        HindsightBackdrop(decorated = !loadingOverview) {
             BoxWithConstraints(
                 Modifier
                     .fillMaxSize()
@@ -332,6 +275,7 @@ fun UsageApp(model: UsageModel = viewModel(), widgetNavigation: WidgetNavigation
                                 labels = navItems,
                                 icons = navIcons,
                                 selected = navPages.indexOf(s.page),
+                                decorated = !loadingOverview,
                                 onNavigate = { model.navigate(navPages[it]) }
                             )
                         }
@@ -343,6 +287,7 @@ fun UsageApp(model: UsageModel = viewModel(), widgetNavigation: WidgetNavigation
                                 labels = navItems,
                                 icons = navIcons,
                                 selected = navPages.indexOf(s.page),
+                                decorated = !loadingOverview,
                                 onNavigate = { model.navigate(navPages[it]) }
                             )
                         }
@@ -356,10 +301,11 @@ fun UsageApp(model: UsageModel = viewModel(), widgetNavigation: WidgetNavigation
                             HindsightToolbar(
                                 model = model,
                                 showCalendar = s.page < 2,
+                                decorated = !loadingOverview,
                                 onCalendar = { showCustomDateRangePicker(context, model) },
                                 onRefresh = model::refresh
                             )
-                            if (model.computing) {
+                            if (model.computing && !loadingOverview) {
                                 LinearProgressIndicator(
                                     Modifier.fillMaxWidth().height(2.dp),
                                     color = c.accent,
@@ -376,32 +322,27 @@ fun UsageApp(model: UsageModel = viewModel(), widgetNavigation: WidgetNavigation
                                 s.page == 3 -> SettingsScreen(
                                     model = model,
                                     onPermission = openUsageAccess,
-                                    onExport = { export.launch("用时记备份_${Dates.date(model.now, model.zone)}.json") },
-                                    onImport = {
-                                        import.launch(
-                                            arrayOf(
-                                                "application/json",
-                                                "text/plain",
-                                                "application/gzip",
-                                                "application/x-gzip",
-                                                "application/octet-stream"
-                                            )
-                                        )
-                                    },
-                                    onCsv = { csv.launch("用时记报表_${Dates.date(model.now, model.zone)}.csv") },
+                                    onExport = checkNotNull(backupDocuments).export,
+                                    onImport = backupDocuments.importBackup,
+                                    onCsv = backupDocuments.csv,
                                     onDiagnostics = showDiagnostics,
                                     onRebuild = model::rebuildHistory,
                                     onSafety = {
                                         model.updateSafetyInfo()
                                         safetyDialog = true
                                     },
-                                    onCompressedExport = {
-                                        compressedExport.launch("用时记备份_${Dates.date(model.now, model.zone)}.json.gz")
-                                    }
+                                    onCompressedExport = backupDocuments.compressedExport
                                 )
                                 s.page == 5 && model.showDesktopData -> DesktopUsageScreen()
                                 !model.permitted && !model.demo && model.display.first == null ->
                                     PermissionScreen(model, onGrant = openUsageAccess)
+                                loadingOverview -> Column(Modifier.padding(start = 18.dp, end = 18.dp, top = 6.dp)) {
+                                    HindsightPageTitle(
+                                        title = UsagePresentation.periodTitle(s.period),
+                                        subtitle = "正在读取记录",
+                                        eyebrow = "使用时间"
+                                    )
+                                }
                                 s.page == 4 -> InsightsScreen(model)
                                 s.page == 2 -> CompareScreen(model)
                                 else -> StatisticsScreen(model, openUsageAccess, showDiagnostics)

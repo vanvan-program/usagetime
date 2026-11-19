@@ -78,6 +78,13 @@ class UsageModel(application:Application,val store:dev.usagetime.app.data.UsageS
         if(selection.page<3&&data===pendingDraw){
             lastCpuDrawMillis=(android.os.SystemClock.elapsedRealtimeNanos()-drawRequestedAt)/1_000_000.0
             pendingDraw=null
+            if(!demo)warmLabels{
+                buildSet {
+                    for(report in listOfNotNull(data.report,data.all,data.other,data.allOther)){
+                        report.apps.forEach{add(it.app)}
+                    }
+                }
+            }
         }
     }
     fun refreshTimeContext(){
@@ -135,6 +142,7 @@ class UsageModel(application:Application,val store:dev.usagetime.app.data.UsageS
                     InsightData(year,UsageInsights.timeline(slices,metric,todayWindow),UsageInsights.calendar(report?.buckets.orEmpty(),currentZone))
                 }
                 insights=result;now=clock;zone=currentZone
+                if(!isDemo)warmLabels{result.timeline.mapNotNullTo(mutableSetOf()){it.app}}
             }catch(error:CancellationException){throw error}
             catch(error:Exception){insightsError="分析暂时无法读取，请重试：${error.message}"}
             finally{if(generation==insightGeneration)insightsLoading=false}
@@ -187,7 +195,6 @@ class UsageModel(application:Application,val store:dev.usagetime.app.data.UsageS
             syncError=null
             val beforeRevision=store.reportRevision.value
             // Reading saved history must not depend on a successful system query.
-            runCatching{store.ensureNamesLoaded()}
             reload()
             reportRequests.join()
             try{if(!demo){val text=store.collect(foreground=true);if(permitted&&recording&&text!="已保存最新记录")message=text}}
@@ -247,7 +254,6 @@ class UsageModel(application:Application,val store:dev.usagetime.app.data.UsageS
             display=result;zone=z;loadError=null
             pendingDraw=result;drawRequestedAt=requestedAt;lastCpuDrawMillis=null
             lastLoadMillis=(android.os.SystemClock.elapsedRealtimeNanos()-requestedAt)/1_000_000.0
-            if(!isDemo)warmLabels(result)
         }
     }
     private suspend fun loadDisplay(s:Selection,isDemo:Boolean,clock:Long,z:ZoneId,includeConfirmed:Boolean)=withContext(Dispatchers.Default){
@@ -261,18 +267,31 @@ class UsageModel(application:Application,val store:dev.usagetime.app.data.UsageS
         val includeConfirmed=showConfirmed
         val clock=wallClock()
         val z=ZoneId.systemDefault()
-        return ReportExportRequest.load(demo,current,includeConfirmed,clock,z){snapshot,confirmed,at,zone->
+        val snapshot=ReportExportRequest.load(demo,current,includeConfirmed,clock,z){snapshot,confirmed,at,zone->
             loadDisplay(snapshot,false,at,zone,confirmed)
         }
+        resolveLabels(buildSet {
+            snapshot.report.apps.forEach{add(it.app)}
+            snapshot.other?.apps?.forEach{add(it.app)}
+        })
+        return snapshot
     }
-    private fun warmLabels(data:DisplayData){
-        val pkgs=buildSet{data.report?.apps?.forEach{add(it.app)};data.all?.apps?.forEach{add(it.app)};data.other?.apps?.forEach{add(it.app)};data.allOther?.apps?.forEach{add(it.app)}}
-        if(pkgs.isEmpty())return
-        viewModelScope.launch{
-            var changed=false
-            for(pkg in pkgs)if(store.cachedLabel(pkg)==null){store.warmLabel(pkg);changed=true}
-            if(changed)labelTick++
+    private fun warmLabels(packages: () -> Set<String>){
+        // Dispatch out of the draw callback so loading names never delays the report draw.
+        viewModelScope.launch(Dispatchers.Main){
+            val apps=packages()
+            if(apps.isEmpty())return@launch
+            resolveLabels(apps)
+            labelTick++
         }
+    }
+    private suspend fun resolveLabels(apps:Set<String>){
+        val missing=apps.filter{store.cachedLabel(it)==null}
+        if(missing.isEmpty())return
+        try{store.ensureNamesLoaded()}
+        catch(cancelled:CancellationException){throw cancelled}
+        catch(_:Exception){} // Unavailable stored names still have a package-manager fallback.
+        for(pkg in missing)if(store.cachedLabel(pkg)==null)store.warmLabel(pkg)
     }
     companion object {
         val demoNames=linkedMapOf("com.tencent.mm" to "微信","tv.danmaku.bili" to "哔哩哔哩","com.ss.android.ugc.aweme" to "抖音","com.android.chrome" to "浏览器","com.netease.cloudmusic" to "网易云音乐","com.autonavi.minimap" to "高德地图","com.tencent.mobileqq" to "QQ")

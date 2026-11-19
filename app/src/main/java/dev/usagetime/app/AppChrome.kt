@@ -67,20 +67,24 @@ import dev.usagetime.core.durationText
 internal fun HindsightToolbar(
     model: UsageModel,
     showCalendar: Boolean,
+    decorated: Boolean,
     onCalendar: () -> Unit,
     onRefresh: () -> Unit
 ) {
     val c = hindsightColors()
-    val headerTop = c.accentSoft.copy(alpha = if (c.dark) 0.5f else 0.55f).compositeOver(c.canvas)
+    val background = if (decorated) {
+        val headerTop = c.accentSoft.copy(alpha = if (c.dark) 0.5f else 0.55f).compositeOver(c.canvas)
+        Modifier.background(Brush.verticalGradient(listOf(headerTop, c.canvas)))
+    } else Modifier.background(c.canvas)
     Row(
         Modifier
             .fillMaxWidth()
-            .background(Brush.verticalGradient(listOf(headerTop, c.canvas)))
+            .then(background)
             .heightIn(min = 58.dp)
             .padding(start = 18.dp, end = 14.dp, top = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        BrandMark(34.dp)
+        BrandMark(34.dp, decorated = decorated)
         Spacer(Modifier.width(10.dp))
         Text(
             "用时记",
@@ -106,7 +110,7 @@ internal fun HindsightToolbar(
                 .clickable(enabled = !model.busy, onClick = onRefresh),
             contentAlignment = Alignment.Center
         ) {
-            if (model.busy) {
+            if (model.busy && decorated) {
                 CircularProgressIndicator(
                     Modifier.size(18.dp),
                     strokeWidth = 2.dp,
@@ -129,6 +133,7 @@ internal fun HindsightBottomNavigation(
     labels: List<String>,
     icons: List<ImageVector>,
     selected: Int,
+    decorated: Boolean,
     onNavigate: (Int) -> Unit
 ) {
     val c = hindsightColors()
@@ -140,7 +145,7 @@ internal fun HindsightBottomNavigation(
         shape = RoundedCornerShape(26.dp),
         color = c.nav,
         border = BorderStroke(1.dp, c.border),
-        shadowElevation = 18.dp
+        shadowElevation = if (decorated) 18.dp else 0.dp
     ) {
         NavigationBar(
             containerColor = Color.Transparent,
@@ -194,6 +199,7 @@ internal fun HindsightNavigationRail(
     labels: List<String>,
     icons: List<ImageVector>,
     selected: Int,
+    decorated: Boolean,
     onNavigate: (Int) -> Unit
 ) {
     val c = hindsightColors()
@@ -206,13 +212,13 @@ internal fun HindsightNavigationRail(
         shape = RoundedCornerShape(26.dp),
         color = c.nav,
         border = BorderStroke(1.dp, c.border),
-        shadowElevation = 16.dp
+        shadowElevation = if (decorated) 16.dp else 0.dp
     ) {
         NavigationRail(
             containerColor = Color.Transparent,
             header = {
                 Box(Modifier.fillMaxWidth().padding(top = 14.dp, bottom = 8.dp), contentAlignment = Alignment.Center) {
-                    BrandMark(38.dp)
+                    BrandMark(38.dp, decorated = decorated)
                 }
             }
         ) {
