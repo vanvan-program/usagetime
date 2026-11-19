@@ -101,8 +101,8 @@ def main(arguments):
     serial = arguments.serial
     if not serial.startswith("emulator-"):
         raise ValueError("Only isolated Android emulators are accepted.")
-    name = adb(serial, "emu", "avd", "name").decode().splitlines()[0].strip()
-    if not name.lower().startswith(("usagetime-qa", "test", "ui_qa_")):
+    avd_name = adb(serial, "emu", "avd", "name").decode().splitlines()[0].strip()
+    if not avd_name.lower().startswith(("usagetime-qa", "test", "ui_qa_")):
         raise ValueError("Use an isolated AVD named usagetime-qa* or test*.")
     existing = adb(serial, "shell", "pm", "list", "packages", PACKAGE).decode()
     if f"package:{PACKAGE}" in existing and not arguments.reuse_qa_install:
@@ -169,7 +169,7 @@ def main(arguments):
                 raise AssertionError(f"Preferences in {name} were lost during the APK upgrade.")
         current = adb(serial, "shell", "dumpsys", "package", PACKAGE).decode()
         report = {
-            "passed": True, "avd": name, "syntheticHistory": actual,
+            "passed": True, "avd": avd_name, "syntheticHistory": actual,
             "preferencesPreserved": True, "updateSourcePreserved": True,
             "installAndLaunchSeconds": round(time.monotonic() - began, 2),
             "oldVersion": next(line.strip() for line in old.splitlines() if "versionName=" in line),
