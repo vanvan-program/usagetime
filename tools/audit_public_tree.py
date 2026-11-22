@@ -9,7 +9,8 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 ALLOWED_ROOTS = {"app", "core", "gradle", "tools", "docs", ".github"}
 ALLOWED_FILES = {
-    ".gitignore", "README.md", "CHANGELOG.md", "LICENSE", "build-local.ps1", "build.gradle.kts",
+    ".gitignore", "README.md", "README.en.md", "README.zh-TW.md", "CHANGELOG.md", "LICENSE",
+    "build-local.ps1", "build.gradle.kts",
     "settings.gradle.kts", "gradle.properties", "gradlew", "gradlew.bat",
 }
 ALLOWED_SUFFIXES = {".kt", ".kts", ".xml", ".json", ".md", ".py", ".pro", ".properties", ".yml"}

@@ -34,6 +34,7 @@ internal object ApkDownloader {
         OkHttpClient.Builder()
             .followRedirects(true)
             .followSslRedirects(true)
+            .addNetworkInterceptor(trustedHostInterceptor())
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .build()
@@ -60,13 +61,17 @@ internal object ApkDownloader {
     ): File {
         val source = release.apkUrl ?: throw UpdateDownloadException("该版本没有可下载的 APK 安装包", emptyList())
         check(AppUpdateChecker.isAllowedExternalUrl(source)) { "安装包地址不在可信范围内" }
+        val expectedSha256 = release.apkSha256 ?: throw UpdateDownloadException(
+            "该版本未提供校验值，请在浏览器中打开 Release 页面下载",
+            emptyList()
+        )
         if (release.apkSizeBytes != null && release.apkSizeBytes > MAX_APK_BYTES) {
             throw UpdateDownloadException("安装包超过大小上限", emptyList())
         }
         val candidates = UpdateMirrors.downloadCandidates(source, mode)
             .filter { (_, url) -> UpdateMirrors.isAllowedDownloadUrl(url) }
         val target = targetFile(context, release.apkName, release.versionName)
-        return downloadTo(target, candidates, release.apkSizeBytes, client, release.apkSha256, onState)
+        return downloadTo(target, candidates, release.apkSizeBytes, client, expectedSha256, onState)
     }
 
     /**
@@ -74,6 +79,7 @@ internal object ApkDownloader {
      *
      * Callers are responsible for validating candidate URLs; this entry point is also used by
      * JVM tests with local HTTP URLs, hence no host check here.
+     * [expectedSha256] stays optional only for those tests; [download] guarantees a non-null digest.
      */
     internal suspend fun downloadTo(
         file: File,

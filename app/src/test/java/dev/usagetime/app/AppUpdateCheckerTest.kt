@@ -5,6 +5,7 @@ import dev.usagetime.app.sync.UpdateCheckResult
 import dev.usagetime.app.sync.UpdateService
 import dev.usagetime.app.sync.UpdateSourceMode
 import kotlinx.coroutines.runBlocking
+import okhttp3.OkHttpClient
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -17,6 +18,9 @@ import java.net.ServerSocket
 import java.util.concurrent.atomic.AtomicReference
 
 class AppUpdateCheckerTest {
+    // Production clients pin every hop to trusted hosts; loopback tests use a plain client instead.
+    private val loopbackClient = OkHttpClient()
+
     @Test fun versionComparisonHandlesSemVerAndNumericSegments() {
         assertTrue(AppUpdateChecker.isNewerVersion("v0.4.3", "0.4.2"))
         assertTrue(AppUpdateChecker.isNewerVersion("0.10.0", "0.4.2"))
@@ -141,7 +145,7 @@ class AppUpdateCheckerTest {
             statusLine = "200 OK",
             body = updateJson
         ) { url ->
-            val result = runBlocking { AppUpdateChecker.checkLatestReleaseSuspend("0.4.2", apiUrl = url) }
+            val result = runBlocking { AppUpdateChecker.checkLatestReleaseSuspend("0.4.2", apiUrl = url, client = loopbackClient) }
             assertTrue(result is UpdateCheckResult.UpdateAvailable)
             assertEquals("0.5.0", (result as UpdateCheckResult.UpdateAvailable).release.versionName)
         }
@@ -149,12 +153,12 @@ class AppUpdateCheckerTest {
         assertEquals("application/vnd.github+json", receivedHeaders["accept"])
 
         withSingleHttpResponse(statusLine = "200 OK", body = updateJson) { url ->
-            val upToDate = AppUpdateChecker.checkLatestRelease("0.5.0", apiUrl = url)
+            val upToDate = AppUpdateChecker.checkLatestRelease("0.5.0", apiUrl = url, client = loopbackClient)
             assertTrue(upToDate is UpdateCheckResult.UpToDate)
         }
 
         withSingleHttpResponse(statusLine = "404 Not Found", body = """{"message":"Not Found"}""") { url ->
-            assertEquals(UpdateCheckResult.NoReleaseYet, AppUpdateChecker.checkLatestRelease("0.4.2", apiUrl = url))
+            assertEquals(UpdateCheckResult.NoReleaseYet, AppUpdateChecker.checkLatestRelease("0.4.2", apiUrl = url, client = loopbackClient))
         }
 
         val rateLimitError = assertThrows(IllegalStateException::class.java) {
@@ -163,14 +167,14 @@ class AppUpdateCheckerTest {
                 extraHeaders = listOf("X-RateLimit-Remaining: 0"),
                 body = """{"message":"API rate limit exceeded"}"""
             ) { url ->
-                AppUpdateChecker.checkLatestRelease("0.4.2", apiUrl = url)
+                AppUpdateChecker.checkLatestRelease("0.4.2", apiUrl = url, client = loopbackClient)
             }
         }
         assertTrue(rateLimitError.message?.contains("上限") == true)
 
         val oversizedError = assertThrows(IllegalStateException::class.java) {
             withSingleHttpResponse(statusLine = "200 OK", body = """{"tag_name":"v0.5.0","body":"${"a".repeat(200)}"}""") { url ->
-                AppUpdateChecker.checkLatestRelease("0.4.2", apiUrl = url, maxResponseBytes = 64)
+                AppUpdateChecker.checkLatestRelease("0.4.2", apiUrl = url, maxResponseBytes = 64, client = loopbackClient)
             }
         }
         assertTrue(oversizedError.message?.contains("过大") == true)
@@ -186,7 +190,7 @@ class AppUpdateCheckerTest {
             val sources = mutableListOf<String>()
             val result = UpdateService.checkLatest("0.4.6", UpdateSourceMode.MIRROR, onSource = {
                 sources += it.id
-            }) { _, url ->
+            }) { _, url, _ ->
                 if (url == AppUpdateChecker.LATEST_RELEASE_API_URL) official else failure
             }
             assertEquals(official, result)
@@ -194,16 +198,84 @@ class AppUpdateCheckerTest {
         }
     }
 
+    @Test fun mirrorReportingInstalledVersionCannotHideOfficialUpdate() = runBlocking {
+        val sources = mutableListOf<String>()
+        val result = UpdateService.checkLatest("0.4.9", UpdateSourceMode.MIRROR, onSource = { sources += it.id }) { version, _, official ->
+            val tag = if (official) "v0.4.10" else "v0.4.9"
+            AppUpdateChecker.parseLatestReleaseJson(version, """{"tag_name":"$tag"}""", trustDigest = official)
+        }
+
+        assertEquals("0.4.10", (result as UpdateCheckResult.UpdateAvailable).release.versionName)
+        assertEquals(listOf("gh-proxy", "github"), sources)
+    }
+
+    @Test fun cachedMirrorCannotConfirmLatestWhenOfficialIsUnavailable() = runBlocking {
+        val error = runCatching {
+            UpdateService.checkLatest("0.4.9", UpdateSourceMode.AUTO) { _, _, official ->
+                if (official) throw java.io.IOException("官方源不可用")
+                UpdateCheckResult.UpToDate("0.4.9", AppUpdateChecker.RELEASES_WEB_URL)
+            }
+        }.exceptionOrNull()
+
+        assertTrue(error is IllegalStateException)
+        assertTrue(error?.message?.contains("无法确认最新版本") == true)
+    }
+
     @Test fun malformedMetadataTriggersMirrorFallback() = runBlocking {
         val sources = mutableListOf<String>()
         val result = UpdateService.checkLatest("0.4.5", UpdateSourceMode.AUTO, onSource = {
             sources += it.id
-        }) { current, url ->
+        }) { current, url, _ ->
             val json = if (url == AppUpdateChecker.LATEST_RELEASE_API_URL) "{}" else """{"tag_name":"v0.4.6"}"""
             AppUpdateChecker.parseLatestReleaseJson(current, json)
         }
         assertTrue(result is UpdateCheckResult.UpdateAvailable)
         assertEquals(listOf("github", "gh-proxy"), sources)
+    }
+
+    @Test fun proxyResponsesCannotSupplyTheDigestForTheApkTheyPointAt() = runBlocking {
+        val digest = "cd".repeat(32)
+        val json = """
+            {
+              "tag_name": "v0.4.6",
+              "assets": [
+                {
+                  "name": "usagetime-0.4.6.apk",
+                  "size": 1000,
+                  "digest": "sha256:$digest",
+                  "browser_download_url": "https://github.com/vanvan-program/usagetime/releases/download/v0.4.6/usagetime-0.4.6.apk"
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val official = AppUpdateChecker.parseLatestReleaseJson("0.4.5", json)
+        assertEquals(digest, (official as UpdateCheckResult.UpdateAvailable).release.apkSha256)
+
+        val untrusted = AppUpdateChecker.parseLatestReleaseJson("0.4.5", json, trustDigest = false)
+        val untrustedRelease = (untrusted as UpdateCheckResult.UpdateAvailable).release
+        assertNull(untrustedRelease.apkSha256)
+        assertTrue(untrustedRelease.apkUrl != null)
+
+        val sources = mutableListOf<String>()
+        val verified = UpdateService.checkLatest("0.4.5", UpdateSourceMode.MIRROR, onSource = { sources += it.id }) { version, _, trustDigest ->
+            val metadata = if (trustDigest) json else json.replace(digest, "ef".repeat(32))
+            AppUpdateChecker.parseLatestReleaseJson(version, metadata, trustDigest)
+        }
+        assertEquals(digest, (verified as UpdateCheckResult.UpdateAvailable).release.apkSha256)
+        assertEquals(listOf("gh-proxy", "github"), sources)
+
+        for (mode in listOf(UpdateSourceMode.AUTO, UpdateSourceMode.MIRROR)) {
+            sources.clear()
+            val fallback = UpdateService.checkLatest("0.4.5", mode, onSource = { sources += it.id }) { version, _, trustDigest ->
+                if (trustDigest) throw java.io.IOException("官方源不可用")
+                AppUpdateChecker.parseLatestReleaseJson(version, json, trustDigest)
+            }
+            assertEquals("gh-proxy", sources.last())
+            val fallbackRelease = (fallback as UpdateCheckResult.UpdateAvailable).release
+            assertNull(fallbackRelease.apkSha256)
+            assertEquals("${AppUpdateChecker.RELEASES_WEB_URL}/tag/v0.4.6", fallbackRelease.releaseUrl)
+        }
     }
 
     private fun withSingleHttpResponse(

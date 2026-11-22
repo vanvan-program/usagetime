@@ -2,13 +2,16 @@ package dev.usagetime.app.sync
 
 import android.content.Context
 import androidx.core.content.edit
+import okhttp3.HttpUrl
+import okhttp3.Interceptor
 import java.io.File
+import java.net.ProtocolException
 import java.net.URI
 import java.util.Locale
 
 internal enum class UpdateSourceMode(val key: String, val label: String, val description: String) {
     AUTO("auto", "自动（推荐）", "优先通过 GitHub 官方检查和下载，失败时使用镜像。"),
-    MIRROR("mirror", "镜像优先", "优先通过第三方镜像检查和下载，失败时尝试 GitHub 官方。"),
+    MIRROR("mirror", "镜像优先", "先查镜像，再通过 GitHub 官方确认版本和安装包校验值。应用内下载时优先使用镜像。"),
     GITHUB("github", "仅 GitHub 官方", "检查和下载均通过 GitHub 官方。");
 
     companion object {
@@ -28,7 +31,7 @@ internal object UpdateMirrors {
         UpdateMirror("ghfast", "ghfast.top", "https://ghfast.top/"),
         UpdateMirror("ghproxy-net", "ghproxy.net", "https://ghproxy.net/")
     )
-    private val proxyHosts = downloadMirrors.mapNotNull { it.proxyPrefix?.let { prefix -> URI(prefix).host } }.toSet()
+    internal val proxyHosts = downloadMirrors.mapNotNull { it.proxyPrefix?.let { prefix -> URI(prefix).host } }.toSet()
 
     fun downloadCandidates(target: String, mode: UpdateSourceMode): List<Pair<UpdateMirror, String>> =
         candidates(target, mode, downloadMirrors)
@@ -60,6 +63,40 @@ internal object UpdateMirrors {
         return uri.host?.lowercase() in proxyHosts
     }
 }
+
+/** Hosts allowed to appear in any hop of an update request. */
+internal object TrustedHosts {
+    private val githubDomains = listOf("github.com", "githubusercontent.com")
+
+    fun allowed(url: HttpUrl): Boolean {
+        if (url.scheme != "https") return false
+        val host = url.host.lowercase(Locale.ROOT)
+        if (host in UpdateMirrors.proxyHosts) return true
+        return githubDomains.any { host == it || host.endsWith(".$it") }
+    }
+}
+
+/**
+ * Fails the call as soon as one network hop leaves the trusted hosts, so a redirect handed out by a
+ * mirror cannot move the download onto a host the app never agreed to talk to.
+ */
+internal fun trustedHostInterceptor(
+    policy: (HttpUrl) -> Boolean = TrustedHosts::allowed
+): Interceptor = Interceptor { chain ->
+    val request = chain.request()
+    requireTrustedHop(policy, request.url)
+    val response = chain.proceed(request)
+    if (!policy(response.request.url)) {
+        response.close()
+        throw ProtocolException("下载地址不在可信范围内")
+    }
+    response
+}
+
+private fun requireTrustedHop(policy: (HttpUrl) -> Boolean, url: HttpUrl) {
+    if (!policy(url)) throw ProtocolException("下载地址不在可信范围内")
+}
+
 internal data class DownloadProgress(val bytesRead: Long, val totalBytes: Long?) {
     val fraction: Float?
         get() = totalBytes?.takeIf { it > 0L }

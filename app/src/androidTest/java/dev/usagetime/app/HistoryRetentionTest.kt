@@ -135,4 +135,68 @@ class HistoryRetentionTest {
             }
         }
     }
+    @Test fun importedSealOlderThanFloorFillsMissingDaysAndNextCompactionStillAdvances()=runBlocking{
+        val db=database()
+        try{
+            db.withTransaction{seed(db)}
+            db.withTransaction{assertEquals(floor,HistoryRetention.compact(db,now,zone))}
+            val imported=floor-2*86400000
+            db.withTransaction{for(metric in UsageMetric.entries)HistoryRetention.save(db,rows(imported,metric),"IMPORTED")}
+            assertEquals(floor,db.history().state()!!.floor)
+            assertEquals("UTC",db.history().state()!!.zone)
+            assertEquals("IMPORTED",db.history().seal("UTC",imported,"PRIMARY")!!.origin)
+            assertEquals(1000L,db.history().rows("UTC",imported,"PRIMARY").single{it.app=="fixture.app"}.millis)
+            HistoryRetention.validate(db.history().rows("UTC",imported,"VISIBLE"),db.history().seal("UTC",imported,"VISIBLE")!!)
+            // 本机已有该日汇总时，导入不允许覆盖
+            assertTrue(runCatching{db.withTransaction{HistoryRetention.save(db,rows(imported,UsageMetric.PRIMARY),"IMPORTED")}}.isFailure)
+            val later=now+86400000
+            val nextFloor=HistoryRetention.cutoff(later,zone)
+            db.withTransaction{
+                for(metric in UsageMetric.entries)HistoryRetention.save(db,rows(floor,metric))
+                db.dual().checkpoint(SyncCheckpoint(nextFloor,DualCodec.encode(EngineState()),nextFloor,1,"test",zone.id))
+            }
+            db.withTransaction{assertEquals(nextFloor,HistoryRetention.compact(db,later,zone))}
+            assertEquals(nextFloor,db.history().state()!!.floor)
+            assertEquals("IMPORTED",db.history().seal("UTC",imported,"PRIMARY")!!.origin)
+        }finally{db.close()}
+    }
+    /** 导入得到的长期汇总：本机从未压缩，90 天以前只剩 IMPORTED 封存。 */
+    private suspend fun seedImportedOnly(target:UsageDatabase,localSlices:Boolean=false,localEvents:Boolean=false){
+        val first=floor-4*86400000
+        var day=first
+        while(day<floor){
+            for(metric in UsageMetric.entries)HistoryRetention.save(target,rows(day,metric),"IMPORTED")
+            day+=86400000
+        }
+        if(localSlices)target.dual().slices(listOf(DualCodec.stored(
+            UsageSlice(UsageMetric.PRIMARY,"fixture.app",first,first+1000,Evidence.INFERRED,"TEST",setOf(EvidenceSource.TEST),emptySet()))))
+        if(localEvents)target.dual().events(listOf(DualCodec.event(first+500,Signal.RESUME,"fixture.app",zone=zone.id)))
+        target.dual().checkpoint(SyncCheckpoint(floor,DualCodec.encode(EngineState()),floor,1,"test",zone.id))
+        target.dual().checkpoint(SyncCheckpoint(-1,DualCodec.encodeProgress(ReplayProgress(true)),0,-1,"","",0))
+    }
+    @Test fun importedSealsAuthorizeCompactionOnlyWhileNoLocalDetailRemains()=runBlocking{
+        val allowed=database()
+        try{
+            allowed.withTransaction{seedImportedOnly(allowed)}
+            assertNull(allowed.history().state())
+            allowed.withTransaction{assertEquals(floor,HistoryRetention.compact(allowed,now,zone))}
+            assertEquals(floor,allowed.history().state()!!.floor)
+            assertEquals("IMPORTED",allowed.history().seal("UTC",floor-4*86400000,"PRIMARY")!!.origin)
+        }finally{allowed.close()}
+        val guarded=database()
+        try{
+            guarded.withTransaction{seedImportedOnly(guarded,localSlices=true)}
+            assertTrue(runCatching{guarded.withTransaction{HistoryRetention.compact(guarded,now,zone)}}.isFailure)
+            assertNull(guarded.history().state())
+            assertEquals(1,guarded.dual().slices(0,floor,"PRIMARY").size)
+        }finally{guarded.close()}
+        val eventsOnly=database()
+        try{
+            // 只有原始事件、还没算出切片：删掉即不可恢复，导入汇总同样无权授权
+            eventsOnly.withTransaction{seedImportedOnly(eventsOnly,localEvents=true)}
+            assertTrue(runCatching{eventsOnly.withTransaction{HistoryRetention.compact(eventsOnly,now,zone)}}.isFailure)
+            assertNull(eventsOnly.history().state())
+            assertEquals(1,eventsOnly.dual().events(0,floor).size)
+        }finally{eventsOnly.close()}
+    }
 }

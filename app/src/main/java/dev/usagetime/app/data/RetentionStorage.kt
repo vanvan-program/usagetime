@@ -85,7 +85,14 @@ object HistoryRetention {
         val seal=HistorySeal(first.zone,first.dayStart,first.metric,first.dayEnd,rows.size.toLong(),digest(rows),origin)
         validate(rows,seal)
         val dao=db.history()
-        require(first.dayStart>=(dao.state()?.floor?:0)){"已压缩历史不能被重新覆盖"}
+        val floor=dao.state()?.floor?:0
+        if(origin=="LOCAL"||first.dayStart>=floor){
+            require(first.dayStart>=floor){"已压缩历史不能被重新覆盖"}
+        }else{
+            // An imported seal older than this device's floor may only fill in a day this device has no rows for;
+            // anything else would overwrite history that was already committed here.
+            require(dao.rows(first.zone,first.dayStart,first.metric).isEmpty()){"已压缩历史不能被重新覆盖"}
+        }
         dao.removeDay(first.zone,first.dayStart,first.metric)
         dao.rows(rows);dao.seal(seal)
     }
@@ -116,12 +123,15 @@ object HistoryRetention {
         val first=previous?.floor?:listOfNotNull<Long>(db.history().first(),detailFirst).minOrNull()?:return 0
         var at=first
         while(at<floor){
+            val dayEnd=Dates.midnight(Dates.date(at,zone).plusDays(1),zone)
             for(metric in UsageMetric.entries){
                 val seal=db.history().seal(zone.id,at,metric.name)?:error("缺少双指标长期汇总")
-                require(seal.origin=="LOCAL"){"导入汇总不能授权本机清理"}
+                // An imported seal may authorize deletion only when this device keeps no detail for that day,
+                // so dropping the raw rows cannot lose anything that still belongs to this device.
+                require(seal.origin=="LOCAL"||!hasLocalDetail(raw,at,dayEnd,metric.name)){"导入汇总不能授权本机清理"}
                 validate(db.history().rows(zone.id,at,metric.name),seal)
             }
-            at=Dates.midnight(Dates.date(at,zone).plusDays(1),zone)
+            at=dayEnd
         }
         // All seals, deletes and the floor commit together; rollback preserves every detail row.
         raw.execSQL(DELETE_EVENTS,arrayOf(floor))
@@ -131,6 +141,17 @@ object HistoryRetention {
         db.history().state(RetentionState(floor=floor,zone=zone.id))
         return floor
     }
+
+    /**
+     * Local evidence still backing that civil day; an imported seal must never authorize deleting it.
+     * Raw events count too: compaction drops `usage_events`, and events without slices are the only
+     * thing a local rebuild can start from.
+     */
+    private fun hasLocalDetail(raw:SupportSQLiteDatabase,dayStart:Long,dayEnd:Long,metric:String):Boolean=
+        raw.query("SELECT EXISTS(SELECT 1 FROM usage_intervals WHERE algorithm=2 AND metric=? AND start>=? AND start<?)",
+            arrayOf<Any?>(metric,dayStart,dayEnd)).use{it.moveToFirst()&&it.getInt(0)!=0}||
+        raw.query("SELECT EXISTS(SELECT 1 FROM usage_events WHERE source!='LEGACY_IMPORT' AND time>=? AND time<?)",
+            arrayOf<Any?>(dayStart,dayEnd)).use{it.moveToFirst()&&it.getInt(0)!=0}
 
     suspend fun mergeImport(db:UsageDatabase){
         val raw=db.openHelper.writableDatabase

@@ -161,6 +161,11 @@ internal fun AboutUpdateCard(
             onMessage("该版本没有可下载的 APK，请前往 Releases 页面查看")
             return
         }
+        if (release.apkSha256 == null) {
+            openExternalUrl(context, release.releaseUrl, onMessage)
+            onMessage("未能从 GitHub 官方取得校验值，已打开发布页")
+            return
+        }
         downloadState = UpdateDownloadState.Running(
             progress = DownloadProgress(0L, release.apkSizeBytes),
             sourceLabel = "准备中",
@@ -548,6 +553,7 @@ private fun UpdateAvailableDialog(
     val sizeText = AppUpdateChecker.formatApkSize(release.apkSizeBytes)
     val publishDate = release.publishedAt?.take(10)?.takeIf { it.length == 10 }
     val hasApk = release.apkUrl != null
+    val canDownloadInApp = hasApk && release.apkSha256 != null
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -573,16 +579,19 @@ private fun UpdateAvailableDialog(
                 publishDate?.let { date ->
                     Text("发布日期：$date", style = MaterialTheme.typography.bodySmall, color = c.textMuted)
                 }
-                if (hasApk && downloadState !is UpdateDownloadState.Running &&
+                if (canDownloadInApp && downloadState !is UpdateDownloadState.Running &&
                     downloadState != UpdateDownloadState.Verifying
                 ) {
                     TextButton(onClick = onSelectSource, contentPadding = PaddingValues(0.dp)) {
                         Text("更新源 · ${sourceMode.label}", color = c.accent)
                     }
                 }
+                if (hasApk && !canDownloadInApp) {
+                    Text("未能从 GitHub 官方取得校验值，请到发布页下载。", style = MaterialTheme.typography.bodySmall)
+                }
                 UpdateDownloadBlock(
                     state = downloadState,
-                    hasApk = hasApk,
+                    hasApk = canDownloadInApp,
                     onCancelDownload = onCancelDownload,
                     onInstall = onInstall,
                     onRetry = onStartDownload
@@ -597,10 +606,10 @@ private fun UpdateAvailableDialog(
         },
         confirmButton = {
             when (downloadState) {
-                UpdateDownloadState.Idle -> if (hasApk) {
+                UpdateDownloadState.Idle -> if (canDownloadInApp) {
                     TextButton(onClick = onStartDownload) { Text("应用内下载并安装") }
                 } else {
-                    TextButton(onClick = { onOpenUrl(release.releaseUrl) }) { Text("前往 Release 下载") }
+                    TextButton(onClick = { onOpenUrl(release.releaseUrl) }) { Text("打开 GitHub 发布页") }
                 }
                 is UpdateDownloadState.Running, UpdateDownloadState.Verifying -> TextButton(onClick = onCancelDownload) {
                     Text("取消下载")
@@ -615,12 +624,10 @@ private fun UpdateAvailableDialog(
         },
         dismissButton = {
             Row {
-                TextButton(
-                    onClick = {
-                        onOpenUrl(release.apkUrl ?: release.releaseUrl)
+                if (canDownloadInApp) {
+                    TextButton(onClick = { onOpenUrl(release.apkUrl ?: release.releaseUrl) }) {
+                        Text("浏览器下载")
                     }
-                ) {
-                    Text(if (hasApk) "浏览器下载" else "查看 Release")
                 }
                 TextButton(onClick = onDismiss) { Text("关闭") }
             }

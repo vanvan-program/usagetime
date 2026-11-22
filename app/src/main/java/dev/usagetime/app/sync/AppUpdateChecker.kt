@@ -77,35 +77,38 @@ internal data class ParsedVersion(
     }
 }
 
-/** Tries the selected sources in order and reports the source for each attempt. */
+/** Uses GitHub to confirm the latest release, with mirrors as a fallback for discovering updates. */
 internal object UpdateService {
     suspend fun checkLatest(
         currentVersion: String,
         mode: UpdateSourceMode,
         onSource: (UpdateMirror) -> Unit = {},
-        fetch: suspend (String, String) -> UpdateCheckResult = { version, url ->
-            AppUpdateChecker.checkLatestReleaseSuspend(version, apiUrl = url)
+        fetch: suspend (String, String, Boolean) -> UpdateCheckResult = { version, url, trustDigest ->
+            AppUpdateChecker.checkLatestReleaseSuspend(version, apiUrl = url, trustDigest = trustDigest)
         }
     ): UpdateCheckResult {
+        val candidates = UpdateMirrors.apiCandidates(mode)
         var lastError: Exception? = null
-        for ((source, url) in UpdateMirrors.apiCandidates(mode)) {
+        var mirrorUpdate: Pair<UpdateMirror, UpdateCheckResult.UpdateAvailable>? = null
+        for ((source, url) in candidates) {
             onSource(source)
             try {
-                val result = fetch(currentVersion, url)
-                if (source != UpdateMirrors.OFFICIAL) {
-                    check(result != UpdateCheckResult.NoReleaseYet) { "未返回正式版本信息" }
-                    if (result is UpdateCheckResult.UpToDate) {
-                        check(!AppUpdateChecker.isNewerVersion(currentVersion, result.latestVersion)) {
-                            "返回的版本低于当前版本"
-                        }
-                    }
-                }
-                return result
+                val official = source == UpdateMirrors.OFFICIAL
+                val result = fetch(currentVersion, url, official)
+                if (official) return result
+
+                // A cached mirror response cannot confirm that the installed version is the latest.
+                check(result is UpdateCheckResult.UpdateAvailable) { "镜像无法确认最新版本，请稍后重试" }
+                mirrorUpdate = source to result
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
                 lastError = error
             }
+        }
+        mirrorUpdate?.let { (source, result) ->
+            if (source != candidates.last().first) onSource(source)
+            return result
         }
         throw lastError ?: IllegalStateException("没有可用的更新源")
     }
@@ -133,6 +136,7 @@ internal object AppUpdateChecker {
         OkHttpClient.Builder()
             .followRedirects(true)
             .followSslRedirects(true)
+            .addNetworkInterceptor(trustedHostInterceptor())
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(15, TimeUnit.SECONDS)
             .callTimeout(20, TimeUnit.SECONDS)
@@ -143,7 +147,8 @@ internal object AppUpdateChecker {
         currentVersion: String,
         apiUrl: String = LATEST_RELEASE_API_URL,
         client: OkHttpClient = defaultClient,
-        maxResponseBytes: Int = MAX_RESPONSE_BYTES
+        maxResponseBytes: Int = MAX_RESPONSE_BYTES,
+        trustDigest: Boolean = true
     ): UpdateCheckResult {
         val request = buildLatestReleaseRequest(currentVersion, apiUrl)
         val call = client.newCall(request)
@@ -159,7 +164,8 @@ internal object AppUpdateChecker {
                         val result = handleLatestReleaseResponse(
                             response = response,
                             currentVersion = currentVersion,
-                            maxResponseBytes = maxResponseBytes
+                            maxResponseBytes = maxResponseBytes,
+                            trustDigest = trustDigest
                         )
                         if (continuation.isActive) continuation.resume(result)
                     } catch (error: Exception) {
@@ -174,11 +180,12 @@ internal object AppUpdateChecker {
         currentVersion: String,
         apiUrl: String = LATEST_RELEASE_API_URL,
         client: OkHttpClient = defaultClient,
-        maxResponseBytes: Int = MAX_RESPONSE_BYTES
+        maxResponseBytes: Int = MAX_RESPONSE_BYTES,
+        trustDigest: Boolean = true
     ): UpdateCheckResult {
         val request = buildLatestReleaseRequest(currentVersion, apiUrl)
         return client.newCall(request).execute().use { response ->
-            handleLatestReleaseResponse(response, currentVersion, maxResponseBytes)
+            handleLatestReleaseResponse(response, currentVersion, maxResponseBytes, trustDigest)
         }
     }
 
@@ -196,7 +203,8 @@ internal object AppUpdateChecker {
     internal fun handleLatestReleaseResponse(
         response: Response,
         currentVersion: String,
-        maxResponseBytes: Int = MAX_RESPONSE_BYTES
+        maxResponseBytes: Int = MAX_RESPONSE_BYTES,
+        trustDigest: Boolean = true
     ): UpdateCheckResult = response.use { res ->
         val code = res.code
         if (code == 404) return UpdateCheckResult.NoReleaseYet
@@ -214,10 +222,14 @@ internal object AppUpdateChecker {
             SyncSupport.readLimitedBytes(it, maxResponseBytes, "GitHub 返回内容过大")
         }
         val text = rawBytes.toString(Charsets.UTF_8)
-        parseLatestReleaseJson(currentVersion, text)
+        parseLatestReleaseJson(currentVersion, text, trustDigest)
     }
 
-    internal fun parseLatestReleaseJson(currentVersion: String, jsonText: String): UpdateCheckResult {
+    internal fun parseLatestReleaseJson(
+        currentVersion: String,
+        jsonText: String,
+        trustDigest: Boolean = true
+    ): UpdateCheckResult {
         val root = JSONObject(jsonText)
         if (root.optBoolean("draft", false) || root.optBoolean("prerelease", false)) {
             return UpdateCheckResult.NoReleaseYet
@@ -225,17 +237,18 @@ internal object AppUpdateChecker {
         val tagName = optNonNullString(root, "tag_name")?.trim().orEmpty()
         val latestVersion = checkNotNull(parseVersion(tagName)) { "返回的版本号无效" }
         val displayVersion = tagName.removePrefix("v").removePrefix("V")
-        val releaseUrl = optNonNullString(root, "html_url")
-            ?.trim()
-            ?.takeIf(::isAllowedExternalUrl)
-            ?: RELEASES_WEB_URL
+        val releaseUrl = if (trustDigest) {
+            optNonNullString(root, "html_url")?.trim()?.takeIf(::isAllowedExternalUrl) ?: RELEASES_WEB_URL
+        } else {
+            "$RELEASES_WEB_URL/tag/$tagName"
+        }
 
         val currentParsed = parseVersion(currentVersion)
         if (currentParsed == null || latestVersion <= currentParsed) {
             return UpdateCheckResult.UpToDate(latestVersion = displayVersion, releaseUrl = releaseUrl)
         }
 
-        val apkAsset = selectApkAsset(root)
+        val apkAsset = selectApkAsset(root, trustDigest)
         val title = optNonNullString(root, "name")?.trim()?.takeIf { it.isNotEmpty() } ?: tagName
         val notes = optNonNullString(root, "body")?.trim().orEmpty().take(MAX_NOTES_CHARS)
         val publishedAt = optNonNullString(root, "published_at")?.trim()?.takeIf { it.isNotEmpty() }
@@ -258,7 +271,7 @@ internal object AppUpdateChecker {
 
     private data class ApkAsset(val url: String, val name: String, val size: Long?, val sha256: String?)
 
-    private fun selectApkAsset(root: JSONObject): ApkAsset? {
+    private fun selectApkAsset(root: JSONObject, trustDigest: Boolean): ApkAsset? {
         val assets = root.optJSONArray("assets") ?: return null
         var fallback: ApkAsset? = null
         for (index in 0 until assets.length()) {
@@ -269,7 +282,11 @@ internal object AppUpdateChecker {
                 continue
             }
             val size = asset.optLong("size", -1L).takeIf { it > 0L }
-            val sha256 = optNonNullString(asset, "digest")?.let { SHA256_DIGEST.matchEntire(it)?.groupValues?.get(1) }
+            val sha256 = if (!trustDigest) {
+                null
+            } else {
+                optNonNullString(asset, "digest")?.let { SHA256_DIGEST.matchEntire(it)?.groupValues?.get(1) }
+            }
             val candidate = ApkAsset(url, name, size, sha256)
             if (name.startsWith("usagetime-", ignoreCase = true)) {
                 return candidate
