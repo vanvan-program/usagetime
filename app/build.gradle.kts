@@ -10,17 +10,16 @@ android {
         applicationId = "dev.usagetime.app"
         minSdk = 29
         targetSdk = 36
-        versionCode = 42
-        versionName = "0.4.13"
+        versionCode = 43
+        versionName = "0.4.14"
         val currentVersion = requireNotNull(versionName)
         val updateNotes = providers.fileContents(rootProject.layout.projectDirectory.file("CHANGELOG.md"))
             .asText.get().lineSequence()
             .dropWhile { !it.startsWith("## $currentVersion - ") }
             .drop(1)
             .takeWhile { !it.startsWith("## ") }
-            .filter { it.startsWith("- ") }
-            .map { it.removePrefix("- ").replace("**", "").replace("`", "") }
             .joinToString("\n")
+            .trim('\n')
         val javaString = updateNotes.replace("\\", "\\\\").replace("\"", "\\\"")
             .replace("\t", "\\t").replace("\n", "\\n")
         buildConfigField("String", "VERSION_UPDATE_NOTES", "\"$javaString\"")
@@ -91,6 +90,10 @@ dependencies {
     implementation("androidx.work:work-runtime-ktx:2.11.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("org.commonmark:commonmark:0.27.1")
+    implementation("org.commonmark:commonmark-ext-gfm-strikethrough:0.27.1")
+    implementation("org.commonmark:commonmark-ext-gfm-tables:0.27.1")
+    implementation("org.commonmark:commonmark-ext-task-list-items:0.27.1")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20250517")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")

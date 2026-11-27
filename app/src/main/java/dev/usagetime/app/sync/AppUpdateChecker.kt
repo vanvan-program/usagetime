@@ -127,7 +127,6 @@ internal object AppUpdateChecker {
         "https://api.github.com/repos/$GITHUB_REPO_OWNER/$GITHUB_REPO_NAME/releases/latest"
 
     internal const val MAX_RESPONSE_BYTES = 512 * 1024
-    private const val MAX_NOTES_CHARS = 4000
     private val SHA256_DIGEST = Regex("sha256:([0-9a-fA-F]{64})")
     private val VERSION_PATTERN =
         Regex("""^[vV]?(\d+(?:\.\d+)*)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$""")
@@ -250,7 +249,7 @@ internal object AppUpdateChecker {
 
         val apkAsset = selectApkAsset(root, trustDigest)
         val title = optNonNullString(root, "name")?.trim()?.takeIf { it.isNotEmpty() } ?: tagName
-        val notes = optNonNullString(root, "body")?.trim().orEmpty().take(MAX_NOTES_CHARS)
+        val notes = optNonNullString(root, "body").orEmpty()
         val publishedAt = optNonNullString(root, "published_at")?.trim()?.takeIf { it.isNotEmpty() }
 
         return UpdateCheckResult.UpdateAvailable(

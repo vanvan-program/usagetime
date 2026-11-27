@@ -184,7 +184,7 @@ fun HindsightTheme(dark: Boolean, content: @Composable () -> Unit) {
         surfaceVariant = palette.fill,
         onSurfaceVariant = palette.textMuted,
         surfaceContainer = palette.cardElevated,
-        surfaceContainerHigh = palette.control,
+        surfaceContainerHigh = palette.cardElevated,
         outline = palette.borderStrong(),
         outlineVariant = palette.border,
         error = palette.danger
@@ -204,7 +204,7 @@ fun HindsightTheme(dark: Boolean, content: @Composable () -> Unit) {
         surfaceVariant = palette.fill,
         onSurfaceVariant = palette.textMuted,
         surfaceContainer = palette.cardElevated,
-        surfaceContainerHigh = palette.control,
+        surfaceContainerHigh = palette.cardElevated,
         outline = palette.borderStrong(),
         outlineVariant = palette.border,
         error = palette.danger
@@ -253,8 +253,8 @@ fun HindsightBackdrop(decorated: Boolean = true, content: @Composable () -> Unit
                 1f to c.canvas
             )
         )
-    } else Modifier.background(c.canvas)
-    Box(Modifier.fillMaxSize().then(background)) { content() }
+    } else Modifier
+    Box(Modifier.fillMaxSize().background(c.canvas).then(background)) { content() }
 }
 
 @Composable
@@ -431,7 +431,7 @@ fun HindsightChip(
         label = "chipBackground"
     )
     val fg by animateColorAsState(
-        if (selected) Color.White else c.textMuted,
+        if (selected) MaterialTheme.colorScheme.onPrimary else c.textMuted,
         animationSpec = tween(180),
         label = "chipForeground"
     )
@@ -468,7 +468,7 @@ fun HindsightPillChip(
             containerColor = c.control,
             labelColor = c.textMuted,
             selectedContainerColor = c.accent,
-            selectedLabelColor = Color.White
+            selectedLabelColor = MaterialTheme.colorScheme.onPrimary
         )
     )
 }

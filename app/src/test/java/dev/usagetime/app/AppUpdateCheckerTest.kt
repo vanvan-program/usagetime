@@ -6,6 +6,7 @@ import dev.usagetime.app.sync.UpdateService
 import dev.usagetime.app.sync.UpdateSourceMode
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -83,6 +84,13 @@ class AppUpdateCheckerTest {
             "https://github.com/vanvan-program/usagetime/releases/download/v0.4.3/usagetime-0.4.3.apk",
             release.apkUrl
         )
+    }
+
+    @Test fun parseReleaseJsonPreservesTheEntireAnnouncement() {
+        val body = ("- 更新说明\n".repeat(750)) + "\n## 公告结尾\n"
+        val json = JSONObject().put("tag_name", "v0.4.3").put("body", body).toString()
+        val parsed = AppUpdateChecker.parseLatestReleaseJson("0.4.2", json) as UpdateCheckResult.UpdateAvailable
+        assertEquals(body, parsed.release.notes)
     }
 
     @Test fun parseReleaseJsonIgnoresDraftsPrereleasesAndUnsafeLinks() {

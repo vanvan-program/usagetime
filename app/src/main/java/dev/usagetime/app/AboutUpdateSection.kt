@@ -305,7 +305,10 @@ internal fun AboutUpdateCard(
     }
 
     if (showVersionNotes) {
-        VersionNotesDialog(onDismiss = { showVersionNotes = false })
+        VersionNotesDialog(
+            onOpenUrl = { url -> openExternalUrl(context, url, onMessage) },
+            onDismiss = { showVersionNotes = false }
+        )
     }
 
     if (showSourceDialog) {
@@ -367,33 +370,25 @@ private fun UpdateSourceDialog(
 }
 
 @Composable
-private fun VersionNotesDialog(onDismiss: () -> Unit) {
+private fun VersionNotesDialog(onOpenUrl: (String) -> Unit, onDismiss: () -> Unit) {
     val c = hindsightColors()
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = c.card,
         title = { Text("版本更新介绍") },
         text = {
-            Column(
-                Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ReleaseNotesMarkdown(
+                markdown = BuildConfig.VERSION_UPDATE_NOTES,
+                baseUrl = "${AppUpdateChecker.REPO_WEB_URL}/blob/v${BuildConfig.VERSION_NAME}/CHANGELOG.md",
+                onOpenUrl = onOpenUrl,
+                modifier = Modifier.heightIn(max = 420.dp),
+                emptyMessage = "此版本暂无内置更新介绍。"
             ) {
                 Text(
                     "用时记 v${BuildConfig.VERSION_NAME}",
                     style = MaterialTheme.typography.titleSmall,
                     color = c.textStrong
                 )
-                val notes = BuildConfig.VERSION_UPDATE_NOTES
-                if (notes.isBlank()) {
-                    Text("此版本暂无内置更新介绍。", color = c.textMuted)
-                } else {
-                    notes.lineSequence().forEach { note ->
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text("•", color = c.textMuted)
-                            Text(note, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, color = c.textRegular)
-                        }
-                    }
-                }
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } }
@@ -554,54 +549,52 @@ private fun UpdateAvailableDialog(
     val publishDate = release.publishedAt?.take(10)?.takeIf { it.length == 10 }
     val hasApk = release.apkUrl != null
     val canDownloadInApp = hasApk && release.apkSha256 != null
+    val notesSourceUrl = "${AppUpdateChecker.REPO_WEB_URL}/blob/${release.tagName}/docs/RELEASE-${release.versionName}.md"
 
     AlertDialog(
         onDismissRequest = onDismiss,
+        containerColor = c.card,
         title = { Text("发现新版本 v${release.versionName}") },
         text = {
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 420.dp)
-                    .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ReleaseNotesMarkdown(
+                markdown = release.notes,
+                baseUrl = notesSourceUrl,
+                onOpenUrl = onOpenUrl,
+                modifier = Modifier.heightIn(max = 420.dp),
+                emptyMessage = "请前往 GitHub Releases 页面查看本次更新说明。"
             ) {
-                Text(
-                    "当前版本 v${BuildConfig.VERSION_NAME} → 最新版本 ${release.tagName}",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = c.textStrong,
-                    fontWeight = FontWeight.SemiBold
-                )
-                release.apkName?.let { name ->
-                    val detail = if (sizeText != null) "$name（$sizeText）" else name
-                    Text("安装包：$detail", style = MaterialTheme.typography.bodySmall, color = c.textMuted)
-                }
-                publishDate?.let { date ->
-                    Text("发布日期：$date", style = MaterialTheme.typography.bodySmall, color = c.textMuted)
-                }
-                if (canDownloadInApp && downloadState !is UpdateDownloadState.Running &&
-                    downloadState != UpdateDownloadState.Verifying
-                ) {
-                    TextButton(onClick = onSelectSource, contentPadding = PaddingValues(0.dp)) {
-                        Text("更新源 · ${sourceMode.label}", color = c.accent)
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "当前版本 v${BuildConfig.VERSION_NAME} → 最新版本 ${release.tagName}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = c.textStrong,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    release.apkName?.let { name ->
+                        val detail = if (sizeText != null) "$name（$sizeText）" else name
+                        Text("安装包：$detail", style = MaterialTheme.typography.bodySmall, color = c.textMuted)
                     }
+                    publishDate?.let { date ->
+                        Text("发布日期：$date", style = MaterialTheme.typography.bodySmall, color = c.textMuted)
+                    }
+                    if (canDownloadInApp && downloadState !is UpdateDownloadState.Running &&
+                        downloadState != UpdateDownloadState.Verifying
+                    ) {
+                        TextButton(onClick = onSelectSource, contentPadding = PaddingValues(0.dp)) {
+                            Text("更新源 · ${sourceMode.label}", color = c.accent)
+                        }
+                    }
+                    if (hasApk && !canDownloadInApp) {
+                        Text("未能从 GitHub 官方取得校验值，请到发布页下载。", style = MaterialTheme.typography.bodySmall)
+                    }
+                    UpdateDownloadBlock(
+                        state = downloadState,
+                        hasApk = canDownloadInApp,
+                        onCancelDownload = onCancelDownload,
+                        onInstall = onInstall,
+                        onRetry = onStartDownload
+                    )
                 }
-                if (hasApk && !canDownloadInApp) {
-                    Text("未能从 GitHub 官方取得校验值，请到发布页下载。", style = MaterialTheme.typography.bodySmall)
-                }
-                UpdateDownloadBlock(
-                    state = downloadState,
-                    hasApk = canDownloadInApp,
-                    onCancelDownload = onCancelDownload,
-                    onInstall = onInstall,
-                    onRetry = onStartDownload
-                )
-                Text(
-                    text = release.notes.ifBlank { "请前往 GitHub Releases 页面查看本次更新说明。" },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = c.textRegular,
-                    modifier = Modifier.padding(top = 4.dp)
-                )
             }
         },
         confirmButton = {

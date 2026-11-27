@@ -184,8 +184,8 @@ internal fun HindsightBottomNavigation(
                     colors = NavigationBarItemDefaults.colors(
                         selectedIconColor = c.accent,
                         selectedTextColor = c.accent,
-                        unselectedIconColor = c.textFaint,
-                        unselectedTextColor = c.textFaint,
+                        unselectedIconColor = c.textMuted,
+                        unselectedTextColor = c.textMuted,
                         indicatorColor = Color.Transparent
                     )
                 )
@@ -249,8 +249,8 @@ internal fun HindsightNavigationRail(
                     colors = NavigationRailItemDefaults.colors(
                         selectedIconColor = c.accent,
                         selectedTextColor = c.accent,
-                        unselectedIconColor = c.textFaint,
-                        unselectedTextColor = c.textFaint,
+                        unselectedIconColor = c.textMuted,
+                        unselectedTextColor = c.textMuted,
                         indicatorColor = Color.Transparent
                     )
                 )
@@ -296,8 +296,6 @@ internal fun PermissionScreen(model: UsageModel, onGrant: () -> Unit) {
             ),
             contentPadding = 24.dp
         ) {
-            BrandMark(52.dp)
-            Spacer(Modifier.height(22.dp))
             Text(
                 "开始记录你的用时",
                 style = MaterialTheme.typography.headlineLarge,
@@ -309,23 +307,11 @@ internal fun PermissionScreen(model: UsageModel, onGrant: () -> Unit) {
                 style = MaterialTheme.typography.bodyLarge,
                 color = c.textRegular
             )
-            Spacer(Modifier.height(12.dp))
-            Text(
-                "授权后会导入系统仍保留的近期记录，并持续保存到本机。更早的记录无法凭空恢复，图表会明确留空。",
-                style = MaterialTheme.typography.bodySmall,
-                color = c.textMuted
-            )
-            Spacer(Modifier.height(18.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                HindsightBadge("无需账号")
-                HindsightBadge("同步自愿开启")
-            }
         }
         Button(
             onClick = onGrant,
             modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
-            shape = RoundedCornerShape(16.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = Color.White)
+            shape = RoundedCornerShape(16.dp)
         ) {
             Text("前往授权", fontWeight = FontWeight.SemiBold)
         }
@@ -339,10 +325,15 @@ internal fun PermissionScreen(model: UsageModel, onGrant: () -> Unit) {
             Text("先体验示例数据", fontWeight = FontWeight.SemiBold)
         }
         Text(
+            "授权后会导入系统仍保留的近期记录，并持续保存到本机。更早的记录无法凭空恢复，图表会明确留空。",
+            style = MaterialTheme.typography.bodySmall,
+            color = c.textMuted
+        )
+        Text(
             "无需账号 · 默认本机保存 · 云端同步自愿开启",
             modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
             style = MaterialTheme.typography.labelSmall,
-            color = c.textFaint,
+            color = c.textMuted,
             textAlign = TextAlign.Center
         )
     }
