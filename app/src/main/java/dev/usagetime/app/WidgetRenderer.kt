@@ -187,7 +187,11 @@ class WidgetRenderer(private val context: Context, private val darkOverride: Boo
         val intent = Intent(context, MainActivity::class.java).apply {
             data = destination.toUri()
             flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
-            putExtra(UsageWidgetProvider.EXTRA_PAGE, if (style == WidgetStyle.APPS || style == WidgetStyle.CATEGORIES) 1 else 0)
+            putExtra(UsageWidgetProvider.EXTRA_PAGE, when (style) {
+                WidgetStyle.APPS -> 1
+                WidgetStyle.CATEGORIES -> 4
+                else -> 0
+            })
             putExtra(UsageWidgetProvider.EXTRA_WEEK, style == WidgetStyle.WEEK)
             app?.let { putExtra(UsageWidgetProvider.EXTRA_APP, it) }
         }

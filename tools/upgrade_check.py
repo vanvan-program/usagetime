@@ -105,7 +105,7 @@ def main(arguments):
     if not avd_name.lower().startswith(("usagetime-qa", "test", "ui_qa_")):
         raise ValueError("Use an isolated AVD named usagetime-qa* or test*.")
     existing = adb(serial, "shell", "pm", "list", "packages", PACKAGE).decode()
-    if f"package:{PACKAGE}" in existing and not arguments.reuse_qa_install:
+    if f"package:{PACKAGE}" in existing.splitlines() and not arguments.reuse_qa_install:
         raise ValueError("The QA package already exists; explicitly pass --reuse-qa-install on this disposable AVD.")
     install_flags = ["-r", "-d"] if arguments.reuse_qa_install else ["-r"]
     if arguments.root_adb:
@@ -139,6 +139,10 @@ def main(arguments):
             '<string name="theme">dark</string></map>'
         ).encode(),
         "update-settings": b'<map><string name="source-mode">mirror</string></map>',
+        "usage-categories": (
+            '<map><string name="assignments">'
+            '{&quot;fixture.upgrade&quot;:&quot;STUDY&quot;}</string></map>'
+        ).encode(),
     }
     with tempfile.TemporaryDirectory(prefix="usagetime-upgrade-") as temporary:
         database = Path(temporary) / "fixture.db"
@@ -195,7 +199,7 @@ def main(arguments):
         current = adb(serial, "shell", "dumpsys", "package", PACKAGE).decode()
         report = {
             "passed": True, "avd": avd_name, "syntheticHistory": actual,
-            "preferencesPreserved": True, "updateSourcePreserved": True,
+            "preferencesPreserved": True, "updateSourcePreserved": True, "manualCategoriesPreserved": True,
             "installAndLaunchSeconds": round(time.monotonic() - began, 2),
             "oldVersion": next(line.strip() for line in old.splitlines() if "versionName=" in line),
             "newVersion": next(line.strip() for line in current.splitlines() if "versionName=" in line),

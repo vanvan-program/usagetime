@@ -26,11 +26,6 @@ class UsageModel(application:Application,val store:dev.usagetime.app.data.UsageS
     var categories by mutableStateOf(categoryPreferences.read());private set
     private var demoCategories by mutableStateOf<Map<String,AppCategory>>(emptyMap())
     val categoryAssignments:Map<String,AppCategory> get()=if(demo)demoCategories else categories
-    var insights by mutableStateOf(InsightData());private set
-    var insightsLoading by mutableStateOf(false);private set
-    var insightsError by mutableStateOf<String?>(null);private set
-    private var insightJob:Job?=null
-    private var insightGeneration=0
     var safetyInfo by mutableStateOf<dev.usagetime.app.data.UsageStore.StorageInfo?>(null);private set
     var safetyInfoLoadFailed by mutableStateOf(false);private set
     private var safetyInfoJob:Job?=null
@@ -76,7 +71,7 @@ class UsageModel(application:Application,val store:dev.usagetime.app.data.UsageS
     private var refreshJob:Job?=null
     private var reportSelection:Selection?=null
     fun reportDrawn(data:DisplayData){
-        if(selection.page<3&&data===pendingDraw){
+        if(selection.isReportPage&&data===pendingDraw){
             lastCpuDrawMillis=(android.os.SystemClock.elapsedRealtimeNanos()-drawRequestedAt)/1_000_000.0
             pendingDraw=null
             if(!demo)warmLabels{
@@ -106,47 +101,29 @@ class UsageModel(application:Application,val store:dev.usagetime.app.data.UsageS
             UsageWidgetProvider.requestUpdate(getApplication())
         }
         // These controls only render/filter the already loaded report, even while a query is running.
-        if(selection.requiresReport(previous))reload()
+        if(selection.requiresReport(previous)){
+            if(selection.page==4)display=display.invalidateReport()
+            reload()
+        }
     }
     fun navigate(page:Int){change{it.copy(page=if(page==5&&!showDesktopData)0 else page,detail=false,app=null,query="")}}
     fun openApp(pkg:String){change{it.copy(page=1,detail=true,app=pkg,line=true,period=if(it.page==2){if(it.monthly)Period.MONTH else Period.WEEK}else it.period,anchor=if(it.page==2)it.compareA else it.anchor)}}
-    fun useDemo(value:Boolean){demo=value;now=wallClock();reload()}
-    fun assignCategory(pkg:String,category:AppCategory){
-        if(demo)demoCategories=demoCategories+(pkg to category)
-        else{categories=categoryPreferences.save(pkg,category);UsageWidgetProvider.requestUpdate(getApplication())}
+    fun useDemo(value:Boolean){
+        if(selection.page==4)display=display.invalidateReport()
+        demo=value
+        now=wallClock()
+        reload()
     }
-    fun openDate(date:LocalDate){change{it.copy(page=0,period=Period.TODAY,anchor=date,app=null,detail=false)}}
-    fun loadInsights(year:Int){
-        insightJob?.cancel()
-        val generation=++insightGeneration
-        insights=InsightData(year)
-        val isDemo=demo;val clock=if(isDemo)now else wallClock();val currentZone=ZoneId.systemDefault()
-        val metric=selection.metric;val legacy=selection.legacy;val confirmed=showConfirmed
-        insightJob=viewModelScope.launch{
-            insightsLoading=true;insightsError=null
-            try{
-                val result=withContext(Dispatchers.Default){
-                    val day=Dates.date(clock,currentZone)
-                    val start=Dates.midnight(LocalDate.of(year,1,1),currentZone)
-                    val end=minOf(Dates.midnight(LocalDate.of(year+1,1,1),currentZone),clock)
-                    val todayWindow=Window(Dates.midnight(day,currentZone),clock)
-                    val sample=if(isDemo)sample(clock,currentZone)else null
-                    val report=if(end<=start)null else if(sample!=null){
-                        Reports.build(sample.intervals,sample.coverage,Window(start,end),currentZone,Grain.DAY)
-                    }else if(legacy)store.aggregateLegacy(Window(start,end),currentZone,Grain.DAY,null)
-                    else store.aggregate(Window(start,end),currentZone,Grain.DAY,metric,null,confirmed)
-                    val slices=if(sample!=null)sample.intervals.map{
-                        UsageSlice(metric,it.app,it.start,it.end,Evidence.INFERRED,"SYNTHETIC_DEMO",setOf(EvidenceSource.TEST),emptySet())
-                    }else if(legacy)store.readLegacy(todayWindow).intervals.map{
-                        UsageSlice(metric,it.app,it.start,it.end,Evidence.LEGACY,"LEGACY",setOf(EvidenceSource.LEGACY_IMPORT),emptySet())
-                    }else store.read(todayWindow,metric).slices
-                    InsightData(year,UsageInsights.timeline(slices,metric,todayWindow),UsageInsights.calendar(report?.buckets.orEmpty(),currentZone))
-                }
-                insights=result;now=clock;zone=currentZone
-                if(!isDemo)warmLabels{result.timeline.mapNotNullTo(mutableSetOf()){it.app}}
-            }catch(error:CancellationException){throw error}
-            catch(error:Exception){insightsError="分析暂时无法读取，请重试：${error.message}"}
-            finally{if(generation==insightGeneration)insightsLoading=false}
+    fun assignCategory(pkg:String, category:AppCategory?) {
+        if (demo) {
+            demoCategories = if (category == null) demoCategories - pkg else demoCategories + (pkg to category)
+        } else {
+            try {
+                categories = categoryPreferences.save(pkg, category)
+                UsageWidgetProvider.requestUpdate(getApplication())
+            } catch (error: Exception) {
+                message = error.message ?: "无法保存分类设置"
+            }
         }
     }
     fun theme(value:String){appearance=value;prefs.edit { putString("theme", value) };UsageWidgetProvider.requestUpdate(getApplication())}
@@ -256,7 +233,7 @@ class UsageModel(application:Application,val store:dev.usagetime.app.data.UsageS
         val today=Dates.date(clock,z)
         if(today!=observedToday){selection=selection.followCurrentDate(observedToday,today);observedToday=today}
         now=clock
-        if(selection.page>=3){zone=z;reportRequests.stop();display=display.invalidateReport();return}
+        if(!selection.isReportPage){zone=z;reportRequests.stop();display=display.invalidateReport();loadError=null;return}
         reportRequests.cancel()
         val s=selection
         reportSelection=s

@@ -270,7 +270,6 @@ internal fun StatisticsScreen(
         }
 
         if (r != null) {
-            if (!s.detail) item { CategorySummaryCard(model, r) }
             if (s.page == 1 && !s.detail) {
                 item { SearchAndSortCard(model) }
                 if (apps.isEmpty()) {
@@ -573,7 +572,7 @@ private fun UsageTrendCard(model: UsageModel, report: UsageReport) {
 }
 
 @Composable
-private fun DateNavigator(
+internal fun DateNavigator(
     model: UsageModel,
     modifier: Modifier = Modifier,
     onPick: () -> Unit

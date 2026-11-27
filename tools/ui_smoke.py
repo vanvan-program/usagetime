@@ -31,7 +31,7 @@ def tap(serial, label, scroll=False):
         if scroll:
             containers = [node for node in root.iter("node") if node.attrib.get("scrollable") == "true"]
             if containers:
-                left, top, right, bottom = bounds(containers[0])
+                left, top, right, bottom = max(map(bounds, containers), key=lambda box: box[3] - box[1])
                 x = (left + right) // 2
                 adb(serial, "shell", "input", "swipe", str(x), str(top + (bottom - top) * 3 // 4),
                     str(x), str(top + (bottom - top) // 4), "250")
@@ -43,7 +43,7 @@ def capture(serial, output, name):
     output.mkdir(parents=True, exist_ok=True)
     root = tree(serial)
     text = ET.tostring(root, encoding="unicode")
-    if "读取记录失败" in text or "分析暂时无法读取" in text:
+    if "读取记录失败" in text:
         raise AssertionError("App displayed a loading error.")
     (output / f"{name}.xml").write_text(text, encoding="utf-8")
     (output / f"{name}.png").write_bytes(adb(serial, "exec-out", "screencap", "-p"))
@@ -58,33 +58,23 @@ def main(arguments):
         raise ValueError("Use a dedicated usagetime-qa or ui_qa_ AVD.")
     adb(serial, "shell", "am", "force-stop", PACKAGE)
     adb(serial, "shell", "am", "start", "-W", "-n", f"{PACKAGE}/.MainActivity")
-    tap(serial, "分析")
-    capture(serial, arguments.output, "timeline-saved")
-    tap(serial, "月历")
-    capture(serial, arguments.output, "calendar-saved")
-    tap(serial, "年度热力图")
-    capture(serial, arguments.output, "heatmap-saved")
+    tap(serial, "分类")
+    capture(serial, arguments.output, "categories-saved")
     tap(serial, "设置")
     tap(serial, "体验示例数据", scroll=True)
-    tap(serial, "应用")
+    tap(serial, "分类")
+    tap(serial, "7天")
+    capture(serial, arguments.output, "category-donut")
+    tap(serial, "应用归类")
     tap(serial, "微信", scroll=True)
-    tap(serial, "分类：其他 · 修改")
     tap(serial, "学习")
-    capture(serial, arguments.output, "category-detail")
+    capture(serial, arguments.output, "category-manual")
     adb(serial, "shell", "input", "keyevent", "4")
-    tap(serial, "总览")
-    tap(serial, "展开")
-    capture(serial, arguments.output, "category-summary")
-    tap(serial, "分析")
-    capture(serial, arguments.output, "timeline-demo")
-    tap(serial, "月历")
-    capture(serial, arguments.output, "calendar-demo")
-    tap(serial, "1")
-    capture(serial, arguments.output, "calendar-selected-day")
-    tap(serial, "分析")
-    tap(serial, "年度热力图")
-    capture(serial, arguments.output, "heatmap-demo")
-    print(json.dumps({"passed": True, "screenshots": 9, "avd": avd}))
+    tap(serial, "学习", scroll=True)
+    tap(serial, "微信", scroll=True)
+    tap(serial, "默认 · 社交")
+    capture(serial, arguments.output, "category-reset")
+    print(json.dumps({"passed": True, "screenshots": 4, "avd": avd}))
 
 
 if __name__ == "__main__":

@@ -13,6 +13,8 @@ data class Selection(
     val compareA:LocalDate=LocalDate.now(),val compareB:LocalDate=LocalDate.now().minusWeeks(1),
     val same:Boolean=true,val compareApp:String?=null,val query:String="",val nameSort:Boolean=false,val metric:UsageMetric=UsageMetric.PRIMARY,val legacy:Boolean=false
 ){
+    val isReportPage: Boolean get() = page in 0..2 || page == 4
+
     fun requiresReport(previous:Selection)=copy(line=previous.line,query=previous.query,nameSort=previous.nameSort)!=previous
     fun followCurrentDate(previous:LocalDate,today:LocalDate)=copy(
         anchor=if(anchor==previous)today else anchor,

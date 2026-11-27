@@ -11,7 +11,7 @@
 [![Kotlin](https://img.shields.io/badge/Kotlin%20%7C%20Compose%20%7C%20Room-7F52FF?style=flat-square)](#技術棧與從原始碼建置)
 [![License](https://img.shields.io/badge/License-GPL--3.0--only-blue?style=flat-square)](LICENSE)
 
-[下載最新正式版](https://github.com/vanvan-program/usagetime/releases/latest) · [0.4.14 更新說明](docs/RELEASE-0.4.14.md) · [歷史更新紀錄](CHANGELOG.md) · [桌面同步說明](docs/SYNC.md) · [統計口徑說明](docs/STATISTICS-0.3.11.md) · [資料庫說明](docs/DATABASE-0.3.12.md) · [問題回報](https://github.com/vanvan-program/usagetime/issues)
+[下載最新正式版](https://github.com/vanvan-program/usagetime/releases/latest) · [0.4.16 更新說明](docs/RELEASE-0.4.16.md) · [歷史更新紀錄](CHANGELOG.md) · [桌面同步說明](docs/SYNC.md) · [統計口徑說明](docs/STATISTICS-0.3.11.md) · [資料庫說明](docs/DATABASE-0.3.12.md) · [問題回報](https://github.com/vanvan-program/usagetime/issues)
 
 </div>
 
@@ -19,7 +19,7 @@
 
 ## 專案定位
 
-**用時記**是一款支援 **Android 10 及以上**的手機應用程式使用時間統計工具。於本機讀取系統使用事件並完成統計分析，產生小時、日、週、月趨勢圖表、應用程式排行與年度熱力圖，協助你清楚掌握日常螢幕時間分布。
+**用時記**是一款支援 **Android 10 及以上**的手機應用程式使用時間統計工具。於本機讀取系統使用事件並完成統計分析，產生小時、日、週、月趨勢圖表、應用程式排行與分類用時環形圖，協助你清楚掌握日常螢幕時間分布。
 
 - **預設完全本機運作**：無須註冊帳號；未開啟雲端同步且未主動點擊檢查更新時，不發起任何網路連線。
 - **選用端對端加密同步**：自 0.3.19 起可自願開啟 WebDAV 加密同步（供 Hindsight Mobile 修改版檢視）；自 0.4.0 起可在設定中手動開啟「顯示電腦資料」，從 Hindsight 修改版拉取桌面應用程式彙總並獨立呈現（不與手機用時相加）。
@@ -29,7 +29,7 @@
 - **雙統計口徑與證據分級**：
   - 支援「主要使用時間」「螢幕可見時間」及舊版歷史三種口徑切換。
   - 區分「已確認 / 候選估計 / 無法確定 / 未閉合」狀態，明確標示證據品質，不將未知時間視為零。
-- **多維報表與視覺化**：支援小時 / 日 / 月彙總、趨勢對比、應用程式排行、搜尋詳情、手動分類、當日時間軸、月曆與年度熱力圖；內建報表快取提升瀏覽流暢度。
+- **多維報表與視覺化**：支援小時 / 日 / 月彙總、趨勢對比、應用程式排行、搜尋詳情、自動或手動分類、分類用時與占比環形圖；內建報表快取提升瀏覽流暢度。
 - **五款桌面小工具**：用時速覽、今日概覽、應用排行、分類分布、七日趨勢。
 - **電腦用時獨立看板**（預設關閉）：按需透過 WebDAV 拉取端對端加密的桌面應用程式彙總，獨立展示排行、分類分布與近七日趨勢。
 - **雙層儲存與完整備份**：

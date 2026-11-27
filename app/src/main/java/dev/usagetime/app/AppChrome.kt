@@ -215,6 +215,7 @@ internal fun HindsightNavigationRail(
         shadowElevation = if (decorated) 16.dp else 0.dp
     ) {
         NavigationRail(
+            modifier = Modifier.verticalScroll(rememberScrollState()),
             containerColor = Color.Transparent,
             header = {
                 Box(Modifier.fillMaxWidth().padding(top = 14.dp, bottom = 8.dp), contentAlignment = Alignment.Center) {

@@ -124,7 +124,7 @@ class MainActivity : ComponentActivity() {
     private fun widgetNavigation(intent: Intent): WidgetNavigation? {
         if (!intent.hasExtra(UsageWidgetProvider.EXTRA_PAGE)) return null
         return WidgetNavigation(
-            page = intent.getIntExtra(UsageWidgetProvider.EXTRA_PAGE, 0).let { if (it == 1) 1 else 0 },
+            page = intent.getIntExtra(UsageWidgetProvider.EXTRA_PAGE, 0).let { if (it == 1 || it == 4) it else 0 },
             app = intent.getStringExtra(UsageWidgetProvider.EXTRA_APP),
             week = intent.getBooleanExtra(UsageWidgetProvider.EXTRA_WEEK, false),
             request = System.nanoTime()
@@ -216,11 +216,11 @@ fun UsageApp(model: UsageModel = viewModel(), widgetNavigation: WidgetNavigation
         val s = model.selection
         val rendered = model.display
         val startupWorkGate = (context.applicationContext as? UsageTimeApplication)?.startupWorkGate
-        val initialReportReady = rendered.report != null || model.loadError != null || model.selection.page >= 3
+        val initialReportReady = rendered.report != null || model.loadError != null || !s.isReportPage
         val loadingOverview = s.page == 0 && model.permitted &&
             rendered.report == null && model.loadError == null
         ReportDrawnWhen {
-            model.display.report != null || model.loadError != null || model.selection.page >= 3
+            model.display.report != null || model.loadError != null || !model.selection.isReportPage
         }
         val openUsageAccess = { context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) }
         val showDiagnostics: () -> Unit = {
@@ -251,7 +251,7 @@ fun UsageApp(model: UsageModel = viewModel(), widgetNavigation: WidgetNavigation
                 add(Triple(0, "总览", AppIcons.QueryStats))
                 add(Triple(1, "应用", AppIcons.Apps))
                 add(Triple(2, "对比", AppIcons.BarChart))
-                add(Triple(4, "分析", AppIcons.CalendarMonth))
+                add(Triple(4, "分类", AppIcons.PieChart))
                 if (showDesktopData) add(Triple(5, "电脑", AppIcons.Computer))
                 add(Triple(3, "设置", Icons.Outlined.Settings))
             }
@@ -304,7 +304,7 @@ fun UsageApp(model: UsageModel = viewModel(), widgetNavigation: WidgetNavigation
                         ) {
                             HindsightToolbar(
                                 model = model,
-                                showCalendar = s.page < 2,
+                                showCalendar = s.page < 2 || s.page == 4,
                                 decorated = !loadingOverview,
                                 onCalendar = { showCustomDateRangePicker(context, model) },
                                 onRefresh = model::refresh
@@ -347,7 +347,7 @@ fun UsageApp(model: UsageModel = viewModel(), widgetNavigation: WidgetNavigation
                                         eyebrow = "使用时间"
                                     )
                                 }
-                                s.page == 4 -> InsightsScreen(model)
+                                s.page == 4 -> CategoriesScreen(model)
                                 s.page == 2 -> CompareScreen(model)
                                 else -> StatisticsScreen(model, openUsageAccess, showDiagnostics)
                             }

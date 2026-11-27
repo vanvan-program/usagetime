@@ -18,6 +18,19 @@ class UsageInsightsTest {
         assertEquals(AppCategory.OTHER, AppCategory.fromKey("unsupported"))
     }
 
+    @Test fun manualOtherOverridesKnownDefaultAndRegroupsAllUse() {
+        val apps = listOf(AppTotal("com.tencent.mm", 60), AppTotal("tv.danmaku.bili", 40), AppTotal("unknown.app", 20))
+        assertEquals(
+            listOf(CategoryTotal(AppCategory.SOCIAL, 60, 1), CategoryTotal(AppCategory.VIDEO, 40, 1),
+                CategoryTotal(AppCategory.OTHER, 20, 1)),
+            UsageInsights.categories(apps, emptyMap())
+        )
+        assertEquals(
+            listOf(CategoryTotal(AppCategory.OTHER, 80, 2), CategoryTotal(AppCategory.VIDEO, 40, 1)),
+            UsageInsights.categories(apps, mapOf("com.tencent.mm" to AppCategory.OTHER))
+        )
+    }
+
     @Test fun timelineClipsMergesWithoutPromotingEvidenceAndRetainsMissingRanges() {
         val result = UsageInsights.timeline(listOf(slice("a", 5, 20), slice("a", 20, 30),
             slice("a", 30, 35, Evidence.CONFIRMED), slice(null, 40, 45, Evidence.UNKNOWN),

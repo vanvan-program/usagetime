@@ -10,7 +10,7 @@ import androidx.compose.ui.graphics.vector.PathBuilder
 import androidx.compose.ui.unit.dp
 
 /**
- * Local vector definitions for the seven outlined Material icons not included in
+ * Local vector definitions for the outlined Material icons not included in
  * `material-icons-core`, keeping APK size small without the full extended icon pack.
  */
 internal object AppIcons {
@@ -192,6 +192,35 @@ internal object AppIcons {
                 horizontalLineToRelative(4f)
                 verticalLineToRelative(16f)
                 horizontalLineToRelative(-4f)
+                close()
+            }
+        }
+    }
+
+    val PieChart: ImageVector by lazy {
+        outlined("AppIcons.PieChart") {
+            vectorPath {
+                moveTo(11f, 2f)
+                curveTo(5.95f, 2.5f, 2f, 6.76f, 2f, 12f)
+                curveTo(2f, 17.52f, 6.48f, 22f, 12f, 22f)
+                curveTo(17.24f, 22f, 21.5f, 18.05f, 22f, 13f)
+                lineTo(11f, 13f)
+                close()
+                moveTo(9f, 4.62f)
+                lineTo(9f, 15f)
+                lineTo(19.38f, 15f)
+                curveTo(18.19f, 17.93f, 15.33f, 20f, 12f, 20f)
+                curveTo(7.58f, 20f, 4f, 16.42f, 4f, 12f)
+                curveTo(4f, 8.67f, 6.07f, 5.81f, 9f, 4.62f)
+                close()
+                moveTo(13f, 2f)
+                lineTo(13f, 11f)
+                lineTo(22f, 11f)
+                curveTo(21.53f, 6.25f, 17.75f, 2.47f, 13f, 2f)
+                close()
+                moveTo(15f, 4.62f)
+                curveTo(16.99f, 5.43f, 18.57f, 7.01f, 19.38f, 9f)
+                lineTo(15f, 9f)
                 close()
             }
         }

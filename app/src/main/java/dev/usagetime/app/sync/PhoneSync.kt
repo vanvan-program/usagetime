@@ -152,7 +152,7 @@ internal object PhoneSync {
             val zone = ZoneId.systemDefault()
             val today = LocalDate.now(zone)
             val first = store.first()?.let { Dates.date(it, zone) } ?: today
-            val categories = CategoryPreferences(context).read()
+            val categories = AppCategory.defaults + CategoryPreferences(context).read()
             val categoryHash = PhoneSyncHelpers.categoryDigest(categories)
             val ledgerFile = File(context.filesDir, "phone-sync-ledger.json")
             val scope = PhoneSyncHelpers.sha256Hex(

@@ -10,7 +10,7 @@ class CategoryPreferences(context: Context, name: String = "usage-categories") {
     private var cachedRaw: String? = null
     private var cachedMap: Map<String, AppCategory>? = null
 
-    fun read(): Map<String, AppCategory> = synchronized(this) {
+    fun read(): Map<String, AppCategory> = synchronized(preferences) {
         val raw = preferences.getString("assignments", "{}") ?: "{}"
         val existing = cachedMap
         if (existing != null && cachedRaw == raw) return existing
@@ -33,11 +33,13 @@ class CategoryPreferences(context: Context, name: String = "usage-categories") {
         return assignments
     }
 
-    fun save(app: String, category: AppCategory): Map<String, AppCategory> = synchronized(this) {
-        write(read() + (app to category))
+    fun save(app: String, category: AppCategory?): Map<String, AppCategory> = synchronized(preferences) {
+        val assignments = read()
+        val updated = if (category == null) assignments - app else assignments + (app to category)
+        if (updated == assignments) assignments else write(updated)
     }
 
-    fun merge(imported: Map<String, AppCategory>) = synchronized(this) {
+    fun merge(imported: Map<String, AppCategory>) = synchronized(preferences) {
         if (imported.isNotEmpty()) {
             write(imported + read())
         }

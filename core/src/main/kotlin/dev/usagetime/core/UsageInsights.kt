@@ -8,6 +8,35 @@ enum class AppCategory(val label: String) {
     STUDY("学习"), WORK("工作"), SOCIAL("社交"), VIDEO("影音"), GAME("游戏"), OTHER("其他");
 
     companion object {
+        val defaults: Map<String, AppCategory> = buildMap {
+            fun register(category: AppCategory, vararg packages: String) {
+                packages.forEach { put(it, category) }
+            }
+            register(STUDY,
+                "com.chaoxing.mobile", "com.duolingo", "com.netease.edu.ucmooc",
+                "com.youdao.dict", "com.huawei.edu.petal", "org.khanacademy.android")
+            register(WORK,
+                "com.alibaba.android.rimet", "com.tencent.wework", "com.ss.android.lark",
+                "com.larksuite.suite", "com.tencent.wemeet.app", "cn.wps.moffice_eng",
+                "com.microsoft.office.word", "com.microsoft.office.excel", "com.microsoft.teams",
+                "com.slack", "notion.id", "com.google.android.apps.docs")
+            register(SOCIAL,
+                "com.tencent.mm", "com.tencent.mobileqq", "com.sina.weibo", "com.xingin.xhs",
+                "com.whatsapp", "org.telegram.messenger", "com.instagram.android",
+                "com.facebook.orca", "com.discord")
+            register(VIDEO,
+                "tv.danmaku.bili", "com.ss.android.ugc.aweme", "com.ss.android.ugc.aweme.lite",
+                "com.google.android.youtube", "com.netease.cloudmusic", "com.tencent.qqmusic",
+                "com.kugou.android", "com.qiyi.video", "com.tencent.qqlive", "com.youku.phone",
+                "com.smile.gifmaker", "com.spotify.music", "com.netflix.mediaclient")
+            register(GAME,
+                "com.tencent.tmgp.sgame", "com.tencent.tmgp.pubgmhd", "com.tencent.ig",
+                "com.miHoYo.Yuanshen", "com.miHoYo.GenshinImpact", "com.miHoYo.hkrpg",
+                "com.HoYoverse.hkrpgoversea", "com.netease.party", "com.mojang.minecraftpe")
+        }
+
+        fun defaultFor(app: String): AppCategory = defaults[app] ?: OTHER
+
         fun fromKey(key: String?) = entries.firstOrNull { it.name == key } ?: OTHER
     }
 }
@@ -20,8 +49,11 @@ data class TimelineEntry(
 data class CalendarDay(val date: LocalDate, val millis: Long, val available: Boolean, val complete: Boolean)
 
 object UsageInsights {
+    fun categoryFor(app: String, assignments: Map<String, AppCategory>): AppCategory =
+        assignments[app] ?: AppCategory.defaultFor(app)
+
     fun categories(apps: List<AppTotal>, assignments: Map<String, AppCategory>): List<CategoryTotal> =
-        apps.groupBy { assignments[it.app] ?: AppCategory.OTHER }
+        apps.groupBy { categoryFor(it.app, assignments) }
             .map { (category, values) -> CategoryTotal(category, values.sumOf { it.millis }, values.size) }
             .sortedWith(compareByDescending<CategoryTotal> { it.millis }.thenBy { it.category.ordinal })
 

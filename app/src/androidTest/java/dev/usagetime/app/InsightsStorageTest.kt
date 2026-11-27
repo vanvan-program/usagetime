@@ -61,6 +61,22 @@ class InsightsStorageTest {
         }
     }
 
+    @Test fun resetToDefaultPersistsAcrossPreferenceInstances() {
+        val name = "safety-test-category-reset-${UUID.randomUUID()}"
+        val pkg = "com.tencent.mm"
+        try {
+            val preferences = CategoryPreferences(context, name)
+            val otherInstance = CategoryPreferences(context, name)
+            preferences.save(pkg, AppCategory.OTHER)
+            preferences.save("fixture.existing", AppCategory.GAME)
+            assertEquals(AppCategory.OTHER, otherInstance.read()[pkg])
+            assertEquals(mapOf("fixture.existing" to AppCategory.GAME), otherInstance.save(pkg, null))
+            assertEquals(mapOf("fixture.existing" to AppCategory.GAME), preferences.read())
+        } finally {
+            context.deleteSharedPreferences(name)
+        }
+    }
+
     @Test fun widgetLayoutInflatesAndProviderIsRegistered() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         instrumentation.runOnMainSync {

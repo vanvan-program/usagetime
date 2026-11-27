@@ -11,7 +11,7 @@
 [![Kotlin](https://img.shields.io/badge/Kotlin%20%7C%20Compose%20%7C%20Room-7F52FF?style=flat-square)](#tech-stack--building-from-source)
 [![License](https://img.shields.io/badge/License-GPL--3.0--only-blue?style=flat-square)](LICENSE)
 
-[Latest Release](https://github.com/vanvan-program/usagetime/releases/latest) · [0.4.14 Release Notes (Chinese)](docs/RELEASE-0.4.14.md) · [Changelog](CHANGELOG.md) · [Desktop Sync](docs/SYNC.md) · [Metrics Spec](docs/STATISTICS-0.3.11.md) · [Database Notes](docs/DATABASE-0.3.12.md) · [Issues](https://github.com/vanvan-program/usagetime/issues)
+[Latest Release](https://github.com/vanvan-program/usagetime/releases/latest) · [0.4.16 Release Notes (Chinese)](docs/RELEASE-0.4.16.md) · [Changelog](CHANGELOG.md) · [Desktop Sync](docs/SYNC.md) · [Metrics Spec](docs/STATISTICS-0.3.11.md) · [Database Notes](docs/DATABASE-0.3.12.md) · [Issues](https://github.com/vanvan-program/usagetime/issues)
 
 </div>
 
@@ -19,7 +19,7 @@
 
 ## Overview
 
-**UsageTime** is a local-first app usage tracker for **Android 10+**. It reads Android usage events on-device and produces hourly, daily, weekly, and monthly trend charts, app rankings, timelines, and yearly heatmaps—helping you understand where your screen time actually goes.
+**UsageTime** is a local-first app usage tracker for **Android 10+**. It reads Android usage events on-device and produces hourly, daily, weekly, and monthly trend charts, app rankings and category donut charts—helping you understand where your screen time actually goes.
 
 - **Local-First by Default**: No account required. Makes zero network requests unless you opt into cloud sync or manually tap "Check for Updates".
 - **Optional E2EE WebDAV Sync**: Since `v0.3.19`, supports opt-in end-to-end encrypted WebDAV sync for modified Hindsight Mobile builds; since `v0.4.0`, optionally pulls desktop app summaries when "Show Desktop Data" is enabled (displayed separately without merging into phone totals).
@@ -29,7 +29,7 @@
 - **Dual Metrics with Evidence Quality**:
   - Switch between **Primary Usage Time**, **Screen Visible Time**, and legacy history.
   - Explicitly surfaces *Confirmed*, *Candidate Estimate*, *Undetermined*, and *Unclosed* intervals rather than silently treating unknown gaps as zero.
-- **Rich Analytics & Visualizations**: Hourly/daily/monthly rollups, period comparisons, app rankings, search & details, custom app categories, daily timeline, monthly calendar, and yearly heatmap—backed by a bounded report cache.
+- **Rich Analytics & Visualizations**: Hourly/daily/monthly rollups, period comparisons, app rankings, search & details, automatic and manual app categorization, and a donut chart with time and share by category—backed by a bounded report cache.
 - **5 Home Screen Widgets**: Quick Summary, Today Overview, Top Apps, Category Breakdown, and 7-Day Trend.
 - **Desktop Usage Dashboard** *(off by default)*: Displays encrypted desktop app summaries (top apps, categories, 7-day trend) independently from phone data.
 - **Dual-Tier Storage & Full Backups**:
