@@ -8,6 +8,24 @@ import org.junit.Test
 
 /** Compare full ordered reports to the frozen pre-refactor implementation. */
 class ReportQualityEquivalenceTest {
+    @Test fun intervalUnionMatchesOriginalCellsForOverlapsClippingAndInputOrder() {
+        for (seed in 0 until 100) {
+            val random = Random(seed)
+            val shuffled = List(200) {
+                val start = random.nextLong(0, 80)
+                UsageSlice(UsageMetric.entries.random(random), listOf(null, "z", "a").random(random),
+                    start, start + random.nextLong(1, 40), Evidence.entries.random(random),
+                    "FIXTURE", setOf(EvidenceSource.TEST), emptySet(), random.nextBoolean())
+            }
+            for (slices in listOf(shuffled, shuffled.sortedBy { it.start })) {
+                for (metric in UsageMetric.entries) for (window in listOf(Window(0, 120), Window(13, 73), Window(50, 50))) {
+                    assertEquals("seed=$seed metric=$metric window=$window",
+                        Phase7DailyMetricsOracle.cells(slices, metric, window), DailyMetrics.cells(slices, metric, window))
+                }
+            }
+        }
+    }
+
     private fun same(expected: UsageReport, actual: UsageReport) {
         assertEquals(expected, actual)
         assertEquals(expected.total, actual.total)

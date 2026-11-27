@@ -16,6 +16,99 @@ import java.util.UUID
 
 /** Explicit isolated Room check; never opens the production database. */
 class StatisticsQueryTest {
+    @Test fun clippedReportsPreserveResultsWithoutReplacingCompleteDiskBuckets(): Unit = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val name = "safety-test-statistics-${UUID.randomUUID()}.db"
+        val zone = ZoneId.of("America/New_York")
+        val date = LocalDate.of(2026, 11, 1)
+        val dayStart = Dates.midnight(date, zone)
+        val day = Window(dayStart, Dates.midnight(date.plusDays(1), zone))
+        val month = Dates.fullMonth(date, zone)
+        val minute = 60_000L
+        val hour = 60 * minute
+        val firstHour = dayStart + hour
+        val secondHour = firstHour + hour
+        val hours = Window(firstHour, secondHour + hour)
+        val metric = UsageMetric.PRIMARY
+        assertEquals(25 * hour, day.duration)
+        val slices = listOf(
+            UsageSlice(metric, "fixture.a", firstHour + minute, firstHour + 21 * minute,
+                Evidence.CONFIRMED, "FIXTURE", setOf(EvidenceSource.TEST), emptySet()),
+            UsageSlice(metric, "fixture.b", secondHour + minute, secondHour + 18 * minute,
+                Evidence.INFERRED, "FIXTURE", setOf(EvidenceSource.TEST), emptySet(), provisional = true),
+            UsageSlice(metric, "fixture.b", day.end + minute, day.end + 30 * minute,
+                Evidence.INFERRED, "FIXTURE", setOf(EvidenceSource.TEST), emptySet())
+        )
+        val db = Room.databaseBuilder(context, UsageDatabase::class.java, name).build()
+        try {
+            db.dual().slices(slices.map { DualCodec.stored(it) })
+        } finally {
+            db.close()
+        }
+        val complete = listOf(Grain.HOUR to hours, Grain.DAY to day, Grain.MONTH to month)
+        val clipped = (6..25).flatMap { minutes ->
+            val end = secondHour + minutes * minute
+            listOf(Grain.HOUR to Window(firstHour, end), Grain.DAY to Window(dayStart, end),
+                Grain.MONTH to Window(dayStart, end))
+        } + listOf(Grain.HOUR to Window(firstHour + minute, hours.end),
+            Grain.DAY to Window(dayStart + minute, day.end), Grain.MONTH to Window(dayStart + minute, month.end))
+
+        fun expected(grain: Grain, window: Window): UsageReport {
+            fun cells(slot: Window) = DailyMetrics.cells(slices, metric, slot)
+            val days = Reports.slots(window, zone, Grain.DAY)
+            return when (grain) {
+                Grain.HOUR -> DailyMetrics.hourReport(Reports.slots(window, zone, grain).map { it to cells(it) }, window, zone, null)
+                Grain.MONTH -> {
+                    val groups = days.map(::cells)
+                    val recorded = days.zip(groups).sumOf { (slot, rows) -> DailyMetrics.recordedDays(slot, rows, zone).toLong() }
+                    DailyMetrics.monthReport(listOf(window to DailyMetrics.mergeCells(groups, window)), window, zone, null, recorded)
+                }
+                else -> DailyMetrics.Accumulator(window, zone, grain, null).also { report ->
+                    days.forEach { report.addDay(cells(it)) }
+                }.finish()
+            }
+        }
+
+        var store = UsageStore(context, name)
+        try {
+            for ((grain, window) in complete) {
+                assertEquals(expected(grain, window), store.aggregate(window, zone, grain, metric, null))
+            }
+            android.database.sqlite.SQLiteDatabase.openDatabase(context.getDatabasePath(name).path, null,
+                android.database.sqlite.SQLiteDatabase.OPEN_READONLY).use { observer ->
+                fun scalar(sql: String): Long = observer.rawQuery(sql, null).use { cursor ->
+                    check(cursor.moveToFirst())
+                    cursor.getLong(0)
+                }
+                for (table in listOf("hour_usage", "daily_usage", "month_usage")) {
+                    assertTrue("Full buckets should be persisted in $table", scalar("SELECT COUNT(*) FROM $table") > 0)
+                }
+                var revision = scalar("PRAGMA data_version")
+                var writes = 0
+                val times = clipped.map { (grain, window) ->
+                    val started = SystemClock.elapsedRealtimeNanos()
+                    val report = store.aggregate(window, zone, grain, metric, null)
+                    val millis = (SystemClock.elapsedRealtimeNanos() - started) / 1_000_000.0
+                    assertEquals(expected(grain, window), report)
+                    val after = scalar("PRAGMA data_version")
+                    if (after != revision) writes++
+                    revision = after
+                    millis
+                }
+                Log.i("UsageLoadingBench", "clipped report reads=${times.size} diskWrites=$writes medianMs=${times.sorted()[times.size / 2]}")
+                assertEquals("Clipped reports must leave the full disk cache alone", 0, writes)
+            }
+            store.close()
+            store = UsageStore(context, name)
+            for ((grain, window) in complete) {
+                assertEquals(expected(grain, window), store.aggregate(window, zone, grain, metric, null))
+            }
+        } finally {
+            store.close()
+            context.deleteDatabase(name)
+        }
+    }
+
     @Test fun sqlReducedPagesPreserveEveryReportFieldAndRankingTies()=runBlocking{
         val context=InstrumentationRegistry.getInstrumentation().targetContext
         val name="safety-test-statistics-${UUID.randomUUID()}.db"

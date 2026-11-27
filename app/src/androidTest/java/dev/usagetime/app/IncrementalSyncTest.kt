@@ -84,11 +84,13 @@ class IncrementalSyncTest {
  }}
  @Test fun upgradeReplaysLegacyOwnWindowEvidenceOnceAndPreservesRawEvents()=runBlocking{fixture{store,name->
   val base=System.currentTimeMillis()-600000;var wall=base+100;var elapsed=1000L
+  // Legacy events use the original package name even when the test app has an applicationIdSuffix.
+  val legacyPackage="dev.usagetime.app"
   val raw=listOf(
    DualCodec.event(base,Signal.SCREEN_ON,zone="UTC"),DualCodec.event(base,Signal.UNLOCK,zone="UTC"),
-   DualCodec.event(base+1,Signal.RESUME,context.packageName,"kotlinx.coroutines.StandaloneCoroutine","old",EvidenceSource.OWN_WINDOW,"UTC"),
-   DualCodec.event(base+10,Signal.PAUSE,context.packageName,"${context.packageName}.MainActivity",zone="UTC"),
-   DualCodec.event(base+11,Signal.STOP,context.packageName,"${context.packageName}.MainActivity",zone="UTC"),
+   DualCodec.event(base+1,Signal.RESUME,legacyPackage,"kotlinx.coroutines.StandaloneCoroutine","old",EvidenceSource.OWN_WINDOW,"UTC"),
+   DualCodec.event(base+10,Signal.PAUSE,legacyPackage,"$legacyPackage.MainActivity",zone="UTC"),
+   DualCodec.event(base+11,Signal.STOP,legacyPackage,"$legacyPackage.MainActivity",zone="UTC"),
    DualCodec.event(base+12,Signal.RESUME,"fixture.a","A",zone="UTC"),
    DualCodec.event(base+80,Signal.STOP,"fixture.a","A",zone="UTC"))
   store.useSyntheticSourceForTests({a,b,_->raw.asSequence().filter{it.time>=a&&it.time<b}},{ClockSample(wall,elapsed,"fixture-boot")})
@@ -302,5 +304,54 @@ class IncrementalSyncTest {
   val healthyStart=windows.minOrNull()?:error("no query recorded")
   assertTrue("healthy overlap should be minutes, not days",healthyStart>=base-40*60000L)
   assertSame("untouched historical report must survive an incremental sync",cachedReport,histReport())
+ }}
+
+ @Test fun appendDefersReportCachesAndStillSealsCompletedDays()=runBlocking{fixture{store,name->
+  val zone=java.time.ZoneId.systemDefault()
+  val midnight=Dates.midnight(java.time.LocalDate.now(zone).minusDays(1),zone)
+  val hour=3_600_000L
+  val base=midnight-2*hour
+  var wall=base+hour/2
+  val raw=events(base).toMutableList()
+  store.useSyntheticSourceForTests(
+   {from,end,_->raw.asSequence().filter{it.time in from until end}},
+   {ClockSample(wall,wall-base+1000,"fixture-boot")})
+  store.collect(foreground=true)
+
+  val previousEnd=wall
+  val reportWindow=Window(base,midnight+100)
+  val grains=listOf(Grain.HOUR,Grain.DAY,Grain.MONTH)
+  for(grain in grains)assertEquals(30L,store.aggregate(reportWindow,zone,grain,UsageMetric.PRIMARY,null).total)
+  raw+=events(previousEnd).drop(2)
+  wall=previousEnd+100
+  store.collect(foreground=true)
+
+  SQLiteDatabase.openDatabase(context.getDatabasePath(name).path,null,SQLiteDatabase.OPEN_READONLY).use{db->
+   for((table,end) in listOf("hour_usage" to "hourEnd","daily_usage" to "dayEnd","month_usage" to "monthEnd")){
+    db.rawQuery("SELECT COUNT(*) FROM $table WHERE $end>?",arrayOf(previousEnd.toString())).use{cursor->
+     assertTrue(cursor.moveToFirst())
+     assertEquals("$table should update when a report requests the changed range",0L,cursor.getLong(0))
+    }
+   }
+  }
+  for(grain in grains)assertEquals(60L,store.aggregate(reportWindow,zone,grain,UsageMetric.PRIMARY,null).total)
+
+  wall=midnight+100
+  store.collect(foreground=true)
+  SQLiteDatabase.openDatabase(context.getDatabasePath(name).path,null,SQLiteDatabase.OPEN_READONLY).use{db->
+   db.rawQuery("SELECT COUNT(*) FROM history_seals WHERE dayEnd=? AND zone=? AND origin='LOCAL'",
+    arrayOf(midnight.toString(),zone.id)).use{cursor->
+    assertTrue(cursor.moveToFirst())
+    assertEquals(2L,cursor.getLong(0))
+   }
+  }
+  val beforeReplay=UsageMetric.entries.flatMap{metric->
+   grains.map{store.aggregate(reportWindow,zone,it,metric,null)}
+  }
+  store.rebuildHistory()
+  val afterReplay=UsageMetric.entries.flatMap{metric->
+   grains.map{store.aggregate(reportWindow,zone,it,metric,null)}
+  }
+  assertEquals(afterReplay,beforeReplay)
  }}
 }

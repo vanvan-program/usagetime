@@ -100,6 +100,7 @@ data class MonthMeasure(val monthStart:Long,val monthEnd:Long,val app:String?,va
     @Insert(onConflict=OnConflictStrategy.REPLACE) suspend fun diagnostics(values:List<DiagnosticLog>)
     @Query("SELECT * FROM diagnostic_logs ORDER BY time DESC LIMIT 100") suspend fun diagnostics():List<DiagnosticLog>
     @Query("SELECT MIN(start) FROM usage_intervals") suspend fun first():Long?
+    @Query("SELECT MAX(`end`) FROM usage_intervals") suspend fun lastIntervalEnd():Long?
     @Query("SELECT * FROM daily_usage WHERE dayStart=:start AND dayEnd=:end AND zone=:zone AND metric=:metric AND algorithm=3") suspend fun daily(start:Long,end:Long,zone:String,metric:String):List<DailyUsage>
     @Query("DELETE FROM daily_usage WHERE dayEnd>:start") suspend fun deleteDaysFrom(start:Long)
     @Query("DELETE FROM daily_usage WHERE dayEnd>:start AND zone=:zone") suspend fun deleteDays(start:Long,zone:String)

@@ -7,7 +7,9 @@ import dev.usagetime.app.UsageTimeApplication
 class UsageWorker(context:Context,params:WorkerParameters):CoroutineWorker(context,params){
     override suspend fun doWork():Result=try {
         if(!applicationContext.getSystemService(android.os.UserManager::class.java).isUserUnlocked)throw SyncUnavailable("用户解锁后补记")
-        val store=(applicationContext as UsageTimeApplication).store
+        val app=applicationContext as UsageTimeApplication
+        app.startupWorkGate.awaitReportIfLaunching()
+        val store=app.store
         if(store.recording)store.collect()
         dev.usagetime.app.UsageWidgetProvider.requestUpdate(applicationContext)
         Result.success()

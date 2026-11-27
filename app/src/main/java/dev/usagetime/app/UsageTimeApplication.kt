@@ -1,12 +1,17 @@
 package dev.usagetime.app
 
 import android.app.Application
+import android.os.SystemClock
+import androidx.work.Configuration
 import dev.usagetime.app.data.*
 import kotlinx.coroutines.launch
 
-class UsageTimeApplication:Application(){
+class UsageTimeApplication:Application(), Configuration.Provider {
+    // The scheduler initializes WorkManager from the IO scope below.
+    override val workManagerConfiguration:Configuration get()=Configuration.Builder().build()
     val processSession:String=java.util.UUID.randomUUID().toString()
     val processStartedAt:Long=System.currentTimeMillis()
+    internal val startupWorkGate=StartupWorkGate(SystemClock::elapsedRealtime)
     val observationScope=kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob()+kotlinx.coroutines.Dispatchers.IO)
     val store by lazy{UsageStore(this)}
     override fun onCreate(){

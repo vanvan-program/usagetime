@@ -14,6 +14,7 @@ import dev.usagetime.app.sync.DesktopSync
 import dev.usagetime.core.*
 import dev.usagetime.core.Period
 import kotlinx.coroutines.*
+import kotlinx.coroutines.android.awaitFrame
 import kotlinx.coroutines.flow.drop
 import java.time.*
 import kotlin.random.Random
@@ -186,7 +187,10 @@ class UsageModel(application:Application,val store:dev.usagetime.app.data.UsageS
             image
         }.onFailure{missingIcons.put(pkg,true)}.getOrNull()
     }
-    fun refresh(){
+    fun refresh()=refresh(waitForReportFrame=false)
+    internal fun refreshOnResume()=refresh(waitForReportFrame=display.report==null)
+
+    private fun refresh(waitForReportFrame:Boolean){
         if(refreshJob?.isActive==true)return
         val beforePermitted=store.permitted()
         permitted=beforePermitted
@@ -197,7 +201,14 @@ class UsageModel(application:Application,val store:dev.usagetime.app.data.UsageS
             // Reading saved history must not depend on a successful system query.
             reload()
             reportRequests.join()
-            try{if(!demo){val text=store.collect(foreground=true);if(permitted&&recording&&text!="已保存最新记录")message=text}}
+            try{
+                if(waitForReportFrame&&display.report!=null&&permitted&&recording&&!demo){
+                    // The first callback precedes drawing. Yield through that frame before starting collection.
+                    // Keep a fallback for windows that are detached or no longer producing frames.
+                    withTimeoutOrNull(200L){awaitFrame();awaitFrame()}
+                }
+                if(!demo){val text=store.collect(foreground=true);if(permitted&&recording&&text!="已保存最新记录")message=text}
+            }
             catch(e:CancellationException){throw e}
             catch(e:Exception){syncError="补记失败：${e.message?:e.javaClass.simpleName}";message=syncError}
             finally{

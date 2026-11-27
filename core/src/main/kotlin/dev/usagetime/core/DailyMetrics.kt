@@ -14,9 +14,53 @@ object DailyMetrics {
         if(includeConfirmed)cells else cells.filter{it.evidence!=Evidence.CONFIRMED||it.app==null||it.app==SUMMARY||it.app==OBSERVED}
     fun cells(slices:List<UsageSlice>,metric:UsageMetric,window:Window):List<MetricDayCell>{
         val data=slices.filter{it.metric==metric&&it.end>window.start&&it.start<window.end}
-        val summary=DualReports.summary(data,metric,window)
-        val grouped=data.groupBy{it.app to it.evidence}.map{(key,items)->MetricDayCell(window.start,window.end,key.first,key.second,Reports.unionDuration(items.map{Window(it.start,it.end)},window),Reports.unionDuration(items.filter{it.provisional}.map{Window(it.start,it.end)},window))}
-        return grouped+MetricDayCell(window.start,window.end,SUMMARY,Evidence.UNKNOWN,summary.unknown,summary.provisional)+MetricDayCell(window.start,window.end,OBSERVED,Evidence.CONFIRMED,Reports.unionDuration(data.filter{it.evidence==Evidence.CONFIRMED&&!it.provisional}.map{Window(it.start,it.end)},window),0)
+        val groups=linkedMapOf<Pair<String?,Evidence>,CellDurations>()
+        val ordered=if(data.indices.any{it>0&&data[it-1].start>data[it].start}){
+            // Preserve the input's group order, which determines ties in report rankings.
+            data.forEach{groups.getOrPut(it.app to it.evidence,::CellDurations)}
+            data.sortedBy{it.start}
+        }else data
+        val covered=SpanUnion()
+        val uncertain=SpanUnion()
+        val provisional=SpanUnion()
+        val observed=SpanUnion()
+        for(slice in ordered){
+            val start=maxOf(window.start,slice.start)
+            val end=minOf(window.end,slice.end)
+            val group=groups.getOrPut(slice.app to slice.evidence,::CellDurations)
+            group.total.add(start,end)
+            covered.add(start,end)
+            if(slice.provisional){
+                group.provisional.add(start,end)
+                provisional.add(start,end)
+            }
+            if(slice.evidence==Evidence.CONFIRMED&&!slice.provisional)observed.add(start,end)
+            else uncertain.add(start,end)
+        }
+        val unknown=uncertain.millis+(window.duration-covered.millis).coerceAtLeast(0)
+        return buildList(groups.size+2){
+            groups.forEach{(key,group)->add(MetricDayCell(window.start,window.end,key.first,key.second,group.total.millis,group.provisional.millis))}
+            add(MetricDayCell(window.start,window.end,SUMMARY,Evidence.UNKNOWN,unknown,provisional.millis))
+            add(MetricDayCell(window.start,window.end,OBSERVED,Evidence.CONFIRMED,observed.millis,0))
+        }
+    }
+
+    private class CellDurations {
+        val total=SpanUnion()
+        val provisional=SpanUnion()
+    }
+
+    /** Adds intervals in start order, counting only their portion outside the existing union. */
+    private class SpanUnion {
+        private var lastEnd=Long.MIN_VALUE
+        var millis=0L;private set
+        fun add(start:Long,end:Long){
+            val uncountedStart=maxOf(start,lastEnd)
+            if(end>uncountedStart){
+                millis+=end-uncountedStart
+                lastEnd=end
+            }
+        }
     }
     /** Sums disjoint bucket cells into one cell set covering [slot]; measures are additive across disjoint windows. */
     fun mergeCells(parts:List<List<MetricDayCell>>,slot:Window):List<MetricDayCell>{

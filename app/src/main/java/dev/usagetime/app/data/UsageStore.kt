@@ -61,15 +61,17 @@ abstract class UsageDatabase:RoomDatabase(){abstract fun usage():UsageDao;abstra
 data class Records(val intervals:List<Interval>,val coverage:List<Coverage>,val slices:List<UsageSlice> = emptyList())
 
 class UsageStore(private val context:Context,databaseName:String="usage-history.db") {
-    private val databaseFile=context.getDatabasePath(databaseName)
-    private val missingGuard=File(databaseFile.path+".missing-guard")
+    private val databaseFile by lazy{context.getDatabasePath(databaseName)}
+    private val missingGuard by lazy{File(databaseFile.path+".missing-guard")}
     private var recoveryIssue:String?=null
     private fun syncFolder(dir:File){
         val fd=Os.open(dir.absolutePath,OsConstants.O_RDONLY,0)
         try{Os.fsync(fd)}finally{Os.close(fd)}
     }
-    private val recovery=LocalRecovery(File(context.noBackupFilesDir,"recovery-$databaseName"),databaseFile,
-        available={StatFs(context.filesDir.absolutePath).availableBytes},syncDirectory=::syncFolder)
+    private val recovery by lazy{
+        LocalRecovery(File(context.noBackupFilesDir,"recovery-$databaseName"),databaseFile,
+            available={StatFs(context.filesDir.absolutePath).availableBytes},syncDirectory=::syncFolder)
+    }
     private fun openDatabase(name:String)=Room.databaseBuilder(context,UsageDatabase::class.java,name)
         .addMigrations(DualMigration.FROM_1_TO_2,DualMigration.FROM_2_TO_3,DualMigration.FROM_3_TO_4,DualMigration.FROM_4_TO_5,HistoryMigration.FROM_5_TO_6).openHelperFactory(PreservingOpenHelperFactory()).setJournalMode(RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
         .addCallback(object:RoomDatabase.Callback(){
@@ -82,16 +84,26 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
             db.execSQL("PRAGMA synchronous=FULL")
             db.query("PRAGMA wal_autocheckpoint=256").close()
         }}).build()
-    private var database:UsageDatabase
-    init{
+    private var recoveryChecked=false
+    // Recovery and Room initialization are reached only from storage operations under the IO mutex.
+    private fun checkRecovery(){
+        if(recoveryChecked)return
         // Keep settings/recovery UI accessible even if startup rollback cannot finish.
         try{recovery.recoverInterrupted()}catch(e:Exception){recoveryIssue=e.message?:e.javaClass.simpleName}
         if(recoveryIssue==null&&(!databaseFile.exists()||databaseFile.length()<512)&&recovery.list().isNotEmpty()){
             databaseFile.parentFile!!.mkdirs()
             java.io.FileOutputStream(missingGuard).use{it.write("restore-required".toByteArray());it.fd.sync()};syncFolder(databaseFile.parentFile!!)
         }
-        database=openDatabase(databaseName)
+        recoveryChecked=true
     }
+    private var openedDatabase:UsageDatabase?=null
+    private var database:UsageDatabase
+        get(){
+            openedDatabase?.let{return it}
+            checkRecovery()
+            return openDatabase(databaseFile.name).also{openedDatabase=it}
+        }
+        set(value){openedDatabase=value}
     private val dao get()=database.usage()
     private val dual get()=database.dual()
     private val dualHistory get()=database.history()
@@ -173,6 +185,7 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
 
     data class StorageInfo(val databaseBytes:Long,val snapshotBytes:Long,val freeBytes:Long,val snapshots:Int,val latest:Long?,val canUndo:Boolean,val warning:String?,val copies:List<Long>,val lastExport:Long?)
     suspend fun storageInfo():StorageInfo=withContext(Dispatchers.IO){mutex.withLock{
+        checkRecovery()
         val copies=recovery.list()
         val dbBytes=databaseFile.parentFile!!.listFiles().orEmpty().filter{it.isFile&&it.name.startsWith(databaseFile.name)}.sumOf{it.length()}
         StorageInfo(dbBytes,copies.sumOf{it.file.length()},StatFs(context.filesDir.absolutePath).availableBytes,copies.size,copies.firstOrNull()?.time,recovery.hasRollback(),recoveryIssue?.let{"恢复尚未完成，原文件已保留：$it"}?:preferences.getString("safety-warning",null),copies.map{it.time},preferences.getLong("last-full-export",0).takeIf{it>0})
@@ -321,20 +334,29 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
     suspend fun readLegacy(window:Window):Records=withContext(Dispatchers.IO){mutex.withLock{database.withTransaction{
         Records(dao.intervals(window.start,window.end).map{Interval(it.app,it.start,it.end)},dao.coverage(window.start,window.end).map{Coverage(it.start,it.end,it.reliable)})
     }}}
+    /** One reader per transaction, with the index boundary loaded only if raw detail is needed. */
+    private inner class ObservationReader(private val metric:UsageMetric){
+        private var midpoint:Long?=null
+
+        suspend fun read(window:Window):List<UsageSlice>{
+            val recentFrom=midpoint?:run{
+                val first=dual.first();val last=dual.lastIntervalEnd()
+                // Imported detail can have no local checkpoint. Use the actual interval bounds.
+                (if(first!=null&&last!=null)first+(last-first)/2 else Long.MAX_VALUE).also{midpoint=it}
+            }
+            val values=if(window.start>=recentFrom)dual.recentSlices(window.start,window.end,metric.name)
+                else dual.slices(window.start,window.end,metric.name)
+            return DualCodec.effective(values)
+        }
+
+        suspend fun cells(window:Window):List<MetricDayCell> = DailyMetrics.cells(read(window),metric,window)
+    }
     private suspend fun readInsideTransaction(window:Window,metric:UsageMetric):Records{
-        val first=dual.first();val last=dual.latest()?.time
-        // Prefer the nearest indexed edge: forcing an end range for old dates scans all newer detail.
-        val values=if(first!=null&&last!=null&&window.start>=first+(last-first)/2)
-            dual.recentSlices(window.start,window.end,metric.name)else dual.slices(window.start,window.end,metric.name)
-        val observations=DualCodec.effective(values)
+        val observations=ObservationReader(metric).read(window)
         return Records(observations.filter{it.app!=null&&it.evidence in attributedEvidence}.map{Interval(it.app!!,it.start,it.end)},observations.filter{it.evidence==Evidence.CONFIRMED&&!it.provisional}.map{Coverage(it.start,it.end,true)},observations)
     }
     suspend fun read(window:Window,metric:UsageMetric=UsageMetric.PRIMARY):Records=withContext(Dispatchers.IO){mutex.withLock{database.withTransaction{readInsideTransaction(window,metric)}}}
-    private suspend fun calculateDay(window:Window,metric:UsageMetric):List<MetricDayCell>{
-        // One indexed read per civil day; bucket cells are additive measures, so fragmenting adds no precision.
-        val data=readInsideTransaction(window,metric)
-        return DailyMetrics.cells(data.slices,metric,window)
-    }
+    private suspend fun calculateDay(window:Window,metric:UsageMetric)=ObservationReader(metric).cells(window)
     suspend fun aggregateLegacy(window:Window,zone:ZoneId,grain:Grain,app:String?):UsageReport=cachedReport(ReportKey(window,zone.id,grain,null,app)){database.withTransaction{
         suspend fun records(w:Window)=Records(dao.intervals(w.start,w.end).map{Interval(it.app,it.start,it.end)},dao.coverage(w.start,w.end).map{Coverage(it.start,it.end,it.reliable)})
         if(grain==Grain.HOUR){val r=records(window);return@withTransaction Reports.build(r.intervals,r.coverage,window,zone,grain,app)}
@@ -350,7 +372,11 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         val result=accumulator.finish()
         result.copy(quality=null,appQuality=emptyMap(),fullyCovered=window.duration>0&&result.coveredMillis>=window.duration)
     }}
-    suspend fun discardRecoveryRollback():String=withContext(Dispatchers.IO){mutex.withLock{recovery.discardRollback();"恢复前副本已删除，当前记录保留"}}
+    suspend fun discardRecoveryRollback():String=withContext(Dispatchers.IO){mutex.withLock{
+        checkRecovery()
+        recovery.discardRollback()
+        "恢复前副本已删除，当前记录保留"
+    }}
     private fun dayRows(cells:List<MetricDayCell>,metric:UsageMetric,zone:ZoneId)=cells.map{c->DailyUsage(DualCodec.hash("${c.start}|${zone.id}|$metric|${c.app}|${c.evidence}"),c.start,c.end,zone.id,metric.name,c.app,c.evidence.name,c.millis,c.provisional,3)}
     private fun hourRows(cells:List<MetricDayCell>,metric:UsageMetric,zone:ZoneId)=cells.map{c->HourUsage(DualCodec.hash("hour|${c.start}|${zone.id}|$metric|${c.app}|${c.evidence}"),c.start,c.end,zone.id,metric.name,c.app,c.evidence.name,c.millis,c.provisional,3)}
     private fun monthRows(cells:List<MetricDayCell>,metric:UsageMetric,zone:ZoneId,recordedDays:Long)=cells.map{c->MonthUsage(DualCodec.hash("month|${c.start}|${zone.id}|$metric|${c.app}|${c.evidence}"),c.start,c.end,zone.id,metric.name,c.app,c.evidence.name,c.millis,c.provisional,recordedDays,3)}
@@ -368,8 +394,8 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         budget.loaded=true
     }
     private fun storageWritable()=StatFs(context.filesDir.absolutePath).availableBytes>=LocalRecovery.RESERVE
-    /** Day cells from the day cache; missing days are computed from slices and written back. */
-    private suspend fun dailyCells(slot:Window,metric:UsageMetric,zone:ZoneId,budget:CacheBudget,stored:List<DayMeasure>,archived:Pair<List<HistoryDay>,HistorySeal?>,floor:Long):List<MetricDayCell>{
+    /** Disk rows are keyed by start. Keep clipped reports in the exact-window memory cache. */
+    private suspend fun dailyCells(slot:Window,metric:UsageMetric,zone:ZoneId,budget:CacheBudget,stored:List<DayMeasure>,archived:Pair<List<HistoryDay>,HistorySeal?>,floor:Long,reader:ObservationReader):List<MetricDayCell>{
         if(stored.any{it.app==DailyMetrics.SUMMARY})return stored.map{MetricDayCell(it.dayStart,it.dayEnd,it.app,Evidence.valueOf(it.evidence),it.millis,it.provisionalMillis)}
         // Durable rows outlive both cache trimming and the 90-day detail window.
         val seal=archived.second
@@ -382,8 +408,9 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
             }
         }
         require(slot.start>=floor){"此历史范围仅保留原记录时区的完整每日汇总，无法还原部分日期"}
-        val calculated=calculateDay(slot,metric)
-        if(storageWritable()){
+        val calculated=reader.cells(slot)
+        val date=Dates.date(slot.start,zone)
+        if(slot.start==Dates.midnight(date,zone)&&slot.end==Dates.midnight(date.plusDays(1),zone)&&storageWritable()){
             prepareBudget(budget,zone,Grain.DAY)
             if(budget.allow(slot.start)){
                 dual.daily(dayRows(calculated,metric,zone))
@@ -395,6 +422,7 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
     }
     /** Bounded prefetch keeps Room round trips proportional to pages, not the history's day count. */
     private inner class DayReader(val metric:UsageMetric,val zone:ZoneId,val budget:CacheBudget,val end:Long,val floor:Long){
+        private val observations=ObservationReader(metric)
         private var page=Window(0,0)
         private var days=emptyMap<Long,List<DayMeasure>>()
         private var history=emptyMap<Long,List<HistoryDay>>()
@@ -418,16 +446,15 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
                 }
             }
             return dailyCells(slot,metric,zone,budget,days[slot.start].orEmpty().filter{it.dayEnd==slot.end},
-                history[slot.start].orEmpty() to seals[slot.start],floor)
+                history[slot.start].orEmpty() to seals[slot.start],floor,observations)
         }
     }
-    /** Hour cells from the hour cache; the current partial hour never matches exact bounds and is recomputed live. */
-    private suspend fun hourlyCells(slot:Window,metric:UsageMetric,zone:ZoneId,budget:CacheBudget,stored:List<HourMeasure>):List<MetricDayCell>{
+    /** Hour cells from the cache, with only complete elapsed-hour slots written to disk. */
+    private suspend fun hourlyCells(slot:Window,metric:UsageMetric,zone:ZoneId,budget:CacheBudget,stored:List<HourMeasure>,reader:ObservationReader):List<MetricDayCell>{
         if(stored.any{it.app==DailyMetrics.SUMMARY})return stored.map{MetricDayCell(it.hourStart,it.hourEnd,it.app,Evidence.valueOf(it.evidence),it.millis,it.provisionalMillis)}
         require(slot.start>=(dualHistory.state()?.floor?:0)){"90天以前请查看每日或每月汇总"}
-        val data=readInsideTransaction(slot,metric)
-        val calculated=DailyMetrics.cells(data.slices,metric,slot)
-        if(storageWritable()){
+        val calculated=reader.cells(slot)
+        if(slot.duration==3_600_000L&&storageWritable()){
             prepareBudget(budget,zone,Grain.HOUR)
             if(budget.allow(slot.start)){
                 dual.hourly(hourRows(calculated,metric,zone))
@@ -443,7 +470,7 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         val dayGroups=Reports.slots(slot,zone,Grain.DAY).map{day->day to reader.read(day)}
         val cells=DailyMetrics.mergeCells(dayGroups.map{it.second},slot)
         val days=dayGroups.sumOf{(w,c)->DailyMetrics.recordedDays(w,c,zone).toLong()}
-        if(storageWritable()){
+        if(slot==Dates.fullMonth(Dates.date(slot.start,zone),zone)&&storageWritable()){
             prepareBudget(monthBudget,zone,Grain.MONTH)
             if(monthBudget.allow(slot.start)){
                 dual.monthly(monthRows(cells,metric,zone,days))
@@ -456,10 +483,11 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
     suspend fun aggregate(window:Window,zone:ZoneId,grain:Grain,metric:UsageMetric,app:String?,includeConfirmed:Boolean=true):UsageReport=cachedReport(ReportKey(window,zone.id,grain,metric,app,includeConfirmed)){database.withTransaction{
         if(grain==Grain.HOUR){
             val budget=CacheBudget(200000)
+            val reader=ObservationReader(metric)
             val slotCells=Reports.slots(window,zone,Grain.HOUR).chunked(32).flatMap{page->
                 currentCoroutineContext().ensureActive()
                 val stored=dual.hourlyRange(page.first().start,page.last().end,zone.id,metric.name).groupBy{it.hourStart}
-                page.map{slot->slot to hourlyCells(slot,metric,zone,budget,stored[slot.start].orEmpty().filter{it.hourEnd==slot.end})}
+                page.map{slot->slot to hourlyCells(slot,metric,zone,budget,stored[slot.start].orEmpty().filter{it.hourEnd==slot.end},reader)}
             }
             return@withTransaction DailyMetrics.hourReport(slotCells,window,zone,app,includeConfirmed)
         }
@@ -727,7 +755,7 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         "已保存最新记录"
     }}
     private class SyncTimings{var replayMs=0L;var summaryMs=0L;var replaySpan=0L;var replayStart=0L}
-    /** Replay saved evidence from requestedStart and rebuild hour/day/month summaries inside the caller's transaction. Returns null when nothing derived changed. */
+    /** Replay saved evidence, invalidate report caches and seal completed days in the caller's transaction. */
     private suspend fun recomputeInsideTransaction(now:Long,elapsed:Long,boot:String,zone:ZoneId,requestedStart:Long,cutCandidate:Long,homes:Set<String>,timings:SyncTimings,clockUncertainty:Long=0):Long?{
         val previousEnd=dual.latest()?.time
         require(previousEnd==null||now>=previousEnd){"重放终点不能早于已处理边界"}
@@ -772,35 +800,18 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         }
         val summariesStarted=SystemClock.elapsedRealtime()
         // A changed replay domain invalidates both caches and every durable day it can touch.
-        HistoryRetention.invalidate(database,Dates.midnight(Dates.date(start,zone),zone))
-        val hourStart=java.time.Instant.ofEpochMilli(start).atZone(zone).withMinute(0).withSecond(0).withNano(0).toInstant().toEpochMilli()
         val dayStart=Dates.midnight(Dates.date(start,zone),zone)
-        val monthStart=Dates.midnight(Dates.date(start,zone).withDayOfMonth(1),zone)
-        dual.deleteHoursFrom(hourStart);dual.deleteMonthsFrom(monthStart);dual.deleteDaysFrom(dayStart)
-        // One slice read per day and metric; hour cells merge into the day row they belong to.
-        val hourCacheFloor=now-90*86_400_000L
-        val dayBudget=CacheBudget(500000).apply{rows=dual.dailyCount();floor=dual.cacheFirst(zone.id)}
-        val monthBudget=CacheBudget(500000).apply{rows=dual.monthCount();floor=dual.monthFirst(zone.id)}
-        for(daySlot in Reports.slots(Window(dayStart,now),zone,Grain.DAY)){
+        HistoryRetention.invalidate(database,dayStart)
+        dual.deleteHoursFrom(start);dual.deleteMonthsFrom(start);dual.deleteDaysFrom(start)
+        // Report readers refill missing buckets on demand. Completed days still need durable
+        // summaries in the same transaction as replay, so they can outlive the raw detail.
+        val completeThrough=Dates.midnight(Dates.date(now,zone),zone)
+        for(daySlot in Reports.slots(Window(dayStart,completeThrough),zone,Grain.DAY)){
             for(metric in UsageMetric.entries){
                 currentCoroutineContext().ensureActive()
-                val data=readInsideTransaction(daySlot,metric)
-                val hourCells=Reports.slots(daySlot,zone,Grain.HOUR).filter{it.end>hourStart&&it.end>hourCacheFloor}.map{h->h to DailyMetrics.cells(data.slices,metric,h)}
-                // Partial tail hours keep their actual bounds; very old spans stay slice-computed to bound write amplification.
-                dual.hourly(hourCells.flatMap{(_,c)->hourRows(c,metric,zone)})
-                val cells=DailyMetrics.cells(data.slices,metric,daySlot)
-                val rows=dayRows(cells,metric,zone)
-                dual.daily(rows);dayBudget.record(rows.size,daySlot.start)
-                // The durable day summary and the detail replay commit atomically.
-                if(daySlot.end==Dates.midnight(Dates.date(daySlot.start,zone).plusDays(1),zone))
-                    HistoryRetention.save(database,HistoryRetention.rows(cells,metric,zone))
-            }
-        }
-        for(monthSlot in Reports.slots(Window(monthStart,now),zone,Grain.MONTH)){
-            for(metric in UsageMetric.entries){
-                currentCoroutineContext().ensureActive()
-                val reader=DayReader(metric,zone,dayBudget,now,dualHistory.state()?.floor?:0)
-                monthlyCells(monthSlot,metric,zone,reader,monthBudget,dual.monthly(monthSlot.start,monthSlot.end,zone.id,metric.name).map{MonthMeasure(it)})
+                val cells=calculateDay(daySlot,metric)
+                dual.daily(dayRows(cells,metric,zone))
+                HistoryRetention.save(database,HistoryRetention.rows(cells,metric,zone))
             }
         }
         timings.summaryMs=SystemClock.elapsedRealtime()-summariesStarted

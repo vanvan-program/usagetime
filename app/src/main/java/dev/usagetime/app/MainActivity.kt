@@ -109,6 +109,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        (application as UsageTimeApplication).startupWorkGate.activityStarted()
         enableEdgeToEdge()
         widgetNavigation = widgetNavigation(intent)
         setContent { UsageApp(widgetNavigation = widgetNavigation) }
@@ -185,7 +186,7 @@ fun UsageApp(model: UsageModel = viewModel(), widgetNavigation: WidgetNavigation
     DisposableEffect(lifecycle, model) {
         // Adding the observer to an already resumed Activity delivers the initial ON_RESUME too.
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) model.refresh()
+            if (event == Lifecycle.Event.ON_RESUME) model.refreshOnResume()
         }
         lifecycle.lifecycle.addObserver(observer)
         onDispose { lifecycle.lifecycle.removeObserver(observer) }
@@ -214,6 +215,8 @@ fun UsageApp(model: UsageModel = viewModel(), widgetNavigation: WidgetNavigation
 
         val s = model.selection
         val rendered = model.display
+        val startupWorkGate = (context.applicationContext as? UsageTimeApplication)?.startupWorkGate
+        val initialReportReady = rendered.report != null || model.loadError != null || model.selection.page >= 3
         val loadingOverview = s.page == 0 && model.permitted &&
             rendered.report == null && model.loadError == null
         ReportDrawnWhen {
@@ -262,6 +265,7 @@ fun UsageApp(model: UsageModel = viewModel(), widgetNavigation: WidgetNavigation
                     .drawWithContent {
                         drawContent()
                         model.reportDrawn(rendered)
+                        if (initialReportReady) startupWorkGate?.firstReportDrawn()
                     }
             ) {
                 val wide = maxWidth >= 720.dp
