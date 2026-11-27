@@ -20,6 +20,33 @@ data class StoredSlice(@PrimaryKey val id:String,val metric:String,val app:Strin
         return UsageSlice(UsageMetric.valueOf(metric),app,start,end,Evidence.valueOf(evidence),reason,sources.split(',').filter{it.isNotEmpty()}.map{EvidenceSource.valueOf(it)}.toSet(),tokens.filterNot{it.startsWith(DualUsageEngine.PROOF_PREFIX)}.toSet(),provisional,tokens.filter{it.startsWith(DualUsageEngine.PROOF_PREFIX)}.map{it.removePrefix(DualUsageEngine.PROOF_PREFIX)}.toSet())
     }
 }
+data class SliceMeasure(val app:String?,val start:Long,val end:Long,val evidence:String,val provisional:Boolean,val algorithm:Int,val sources:String)
+data class PrimarySliceTotal(val app:String?,val evidence:String,val sources:String,val millis:Long,val provisionalMillis:Long,val unsafe:Boolean)
+
+private const val PRIMARY_SLICE_ORDERED = """
+    WITH ordered AS (
+        SELECT app,start,`end`,evidence,sources,provisional,algorithm,
+            MAX(`end`) OVER (ORDER BY start ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS previousEnd
+        FROM usage_intervals INDEXED BY
+"""
+// The running maximum keeps even the rows accepted in a conflicting window disjoint.
+private const val PRIMARY_SLICE_TOTALS = """
+        WHERE metric='PRIMARY' AND `end`>:start AND start<:end
+    ), checked AS (
+        SELECT app,start,evidence,sources,provisional,
+            CASE WHEN algorithm!=2 OR typeof(start)!='integer' OR typeof(`end`)!='integer'
+                OR start<0 OR `end`<=start OR provisional NOT IN (0,1) OR previousEnd>start THEN 1 ELSE 0 END AS unsafe,
+            MIN(`end`,:end)-MAX(start,:start) AS millis
+        FROM ordered
+    )
+    SELECT app,evidence,sources,
+        SUM(CASE WHEN unsafe=0 THEN millis ELSE 0 END) AS millis,
+        SUM(CASE WHEN unsafe=0 AND provisional=1 THEN millis ELSE 0 END) AS provisionalMillis,
+        MAX(unsafe) AS unsafe
+    FROM checked
+    GROUP BY app,evidence,sources ORDER BY MIN(start)
+"""
+
 @Entity(tableName="daily_usage",indices=[Index(value=["metric","dayStart"]),Index(value=["zone","dayStart"])])
 data class DailyUsage(@PrimaryKey val id:String,val dayStart:Long,val dayEnd:Long,val zone:String,val metric:String,val app:String?,val evidence:String,val millis:Long,val provisionalMillis:Long,val algorithm:Int=2)
 @Entity(tableName="hour_usage",indices=[Index(value=["metric","hourStart"]),Index(value=["zone","hourStart"])])
@@ -88,6 +115,14 @@ data class MonthMeasure(val monthStart:Long,val monthEnd:Long,val app:String?,va
     @Insert(onConflict=OnConflictStrategy.REPLACE) suspend fun slices(values:List<StoredSlice>)
     @Query("SELECT * FROM usage_intervals INDEXED BY index_usage_intervals_metric_start WHERE metric=:metric AND `end`>:start AND start<:end ORDER BY start") suspend fun slices(start:Long,end:Long,metric:String):List<StoredSlice>
     @Query("SELECT * FROM usage_intervals INDEXED BY index_usage_intervals_metric_end_start WHERE metric=:metric AND `end`>:start AND start<:end ORDER BY start") suspend fun recentSlices(start:Long,end:Long,metric:String):List<StoredSlice>
+    @Query("SELECT app,start,`end`,evidence,provisional,algorithm,sources FROM usage_intervals INDEXED BY index_usage_intervals_metric_start WHERE metric=:metric AND `end`>:start AND start<:end ORDER BY start")
+    suspend fun sliceMeasures(start:Long,end:Long,metric:String):List<SliceMeasure>
+    @Query("SELECT app,start,`end`,evidence,provisional,algorithm,sources FROM usage_intervals INDEXED BY index_usage_intervals_metric_end_start WHERE metric=:metric AND `end`>:start AND start<:end ORDER BY start")
+    suspend fun recentSliceMeasures(start:Long,end:Long,metric:String):List<SliceMeasure>
+    @Query(PRIMARY_SLICE_ORDERED + " index_usage_intervals_metric_start " + PRIMARY_SLICE_TOTALS)
+    suspend fun primarySliceTotals(start:Long,end:Long):List<PrimarySliceTotal>
+    @Query(PRIMARY_SLICE_ORDERED + " index_usage_intervals_metric_end_start " + PRIMARY_SLICE_TOTALS)
+    suspend fun recentPrimarySliceTotals(start:Long,end:Long):List<PrimarySliceTotal>
     @Query("DELETE FROM usage_intervals WHERE start>=:start AND algorithm=2") suspend fun deleteRecent(start:Long)
     @Query("SELECT * FROM sync_checkpoints WHERE time<=:time AND algorithm=2 ORDER BY time DESC LIMIT 1") suspend fun checkpoint(time:Long):SyncCheckpoint?
     @Query("SELECT * FROM sync_checkpoints WHERE algorithm=2 ORDER BY time DESC LIMIT 1") suspend fun latest():SyncCheckpoint?

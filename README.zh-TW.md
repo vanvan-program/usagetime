@@ -11,7 +11,7 @@
 [![Kotlin](https://img.shields.io/badge/Kotlin%20%7C%20Compose%20%7C%20Room-7F52FF?style=flat-square)](#技術棧與從原始碼建置)
 [![License](https://img.shields.io/badge/License-GPL--3.0--only-blue?style=flat-square)](LICENSE)
 
-[下載最新正式版](https://github.com/vanvan-program/usagetime/releases/latest) · [0.4.12 更新說明](docs/RELEASE-0.4.12.md) · [歷史更新紀錄](CHANGELOG.md) · [桌面同步說明](docs/SYNC.md) · [統計口徑說明](docs/STATISTICS-0.3.11.md) · [資料庫說明](docs/DATABASE-0.3.12.md) · [問題回報](https://github.com/vanvan-program/usagetime/issues)
+[下載最新正式版](https://github.com/vanvan-program/usagetime/releases/latest) · [0.4.13 更新說明](docs/RELEASE-0.4.13.md) · [歷史更新紀錄](CHANGELOG.md) · [桌面同步說明](docs/SYNC.md) · [統計口徑說明](docs/STATISTICS-0.3.11.md) · [資料庫說明](docs/DATABASE-0.3.12.md) · [問題回報](https://github.com/vanvan-program/usagetime/issues)
 
 </div>
 

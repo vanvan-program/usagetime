@@ -16,6 +16,164 @@ import java.util.UUID
 
 /** Explicit isolated Room check; never opens the production database. */
 class StatisticsQueryTest {
+    @Test fun denseEvidenceReportMatchesRawDurationsAndKeepsProofReferences(): Unit = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val name = "safety-test-statistics-${UUID.randomUUID()}.db"
+        val zone = ZoneId.of("UTC")
+        val start = Dates.midnight(LocalDate.of(2026, 11, 16), zone)
+        val day = 86_400_000L
+        val window = Window(start, start + 7 * day)
+        val metric = UsageMetric.PRIMARY
+        val proofs = (0 until 24).map { "fixture-proof-$it-${"f".repeat(45)}" }
+        val refs = proofs.joinToString(",") { DualUsageEngine.PROOF_PREFIX + it }
+        val slots = Reports.slots(window, zone, Grain.DAY)
+        val expected = DailyMetrics.Accumulator(window, zone, Grain.DAY)
+        var expectedCachedRows = 0L
+        val db = Room.databaseBuilder(context, UsageDatabase::class.java, name).build()
+        try {
+            db.withTransaction {
+                for (slot in slots) {
+                    val slices = (0 until 1500).map { i ->
+                        val at = slot.start + i * 45_000L
+                        UsageSlice(metric, "fixture.app${i % 35}", at, at + 20_000,
+                            Evidence.entries[i % Evidence.entries.size], "FIXTURE",
+                            emptySet(), emptySet(), provisional = i % 13 == 0)
+                    }
+                    val cells = DailyMetrics.cells(slices, metric, slot)
+                    expected.addDay(cells)
+                    expectedCachedRows += cells.size
+                    db.dual().slices(slices.map { s ->
+                        StoredSlice("${s.start}", metric.name, s.app, s.start, s.end, s.evidence.name,
+                            s.reason, "USAGE_EVENTS,OWN_WINDOW", refs, s.provisional)
+                    })
+                }
+            }
+        } finally {
+            db.close()
+        }
+        val store = UsageStore(context, name)
+        try {
+            store.first()
+            val began = SystemClock.elapsedRealtimeNanos()
+            val report = store.aggregate(window, zone, Grain.DAY, metric, null)
+            val millis = (SystemClock.elapsedRealtimeNanos() - began) / 1_000_000.0
+            assertEquals(expected.finish(), report)
+            val detail = store.read(Window(start, start + 20_000), metric).slices.single()
+            assertEquals(proofs.toSet(), detail.proofRefs)
+            assertEquals(setOf(EvidenceSource.USAGE_EVENTS, EvidenceSource.OWN_WINDOW), detail.sources)
+            val saved = Room.databaseBuilder(context, UsageDatabase::class.java, name).build()
+            try {
+                assertEquals(expectedCachedRows, saved.dual().dailyCount())
+            } finally {
+                saved.close()
+            }
+            Log.i("UsageLoadingBench", "denseEvidenceRows=10500 aggregateMs=$millis")
+        } finally {
+            store.close()
+            context.deleteDatabase(name)
+        }
+    }
+
+    @Test fun projectedReportsKeepOverlapResolutionImportsRankingTiesAndValidation(): Unit = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val name = "safety-test-statistics-${UUID.randomUUID()}.db"
+        val zone = ZoneId.of("UTC")
+        val day = 86_400_000L
+        val start = Dates.midnight(LocalDate.of(2026, 11, 16), zone)
+        fun slice(metric: UsageMetric, app: String, from: Long, to: Long, grade: Evidence = Evidence.INFERRED) =
+            UsageSlice(metric, app, start + from, start + to, grade, "FIXTURE",
+                setOf(EvidenceSource.TEST), setOf("fixture-reference"))
+        val archived = slice(UsageMetric.PRIMARY, "fixture.imported", 50, 550)
+        val primaryA = slice(UsageMetric.PRIMARY, "fixture.a", 100, 400, Evidence.CONFIRMED)
+        val primaryB = slice(UsageMetric.PRIMARY, "fixture.b", 200, 500)
+        val overlapA = primaryA.copy(start = start + day + 100, end = start + day + 400)
+        val overlapB = primaryB.copy(start = start + day + 200, end = start + day + 500)
+        val visibleB = slice(UsageMetric.VISIBLE, "fixture.b", 100, 500)
+        val visibleA = slice(UsageMetric.VISIBLE, "fixture.a", 100, 500)
+        val recentVisibleB = slice(UsageMetric.VISIBLE, "fixture.b", day * 2 + 100, day * 2 + 500)
+        val recentVisibleA = slice(UsageMetric.VISIBLE, "fixture.a", day * 2 + 100, day * 2 + 500)
+        val invalid = DualCodec.stored(slice(UsageMetric.PRIMARY, "fixture.invalid", day * 2 + 100, day * 2 + 200))
+            .copy(sources = "INVALID")
+        val db = Room.databaseBuilder(context, UsageDatabase::class.java, name).build()
+        try {
+            db.dual().slices(listOf(DualCodec.stored(archived, algorithm = 1)) +
+                listOf(primaryA, primaryB, overlapA, overlapB, visibleB, visibleA, recentVisibleB, recentVisibleA)
+                    .map { DualCodec.stored(it) } + invalid)
+        } finally {
+            db.close()
+        }
+        val store = UsageStore(context, name)
+        try {
+            val ranges = listOf(UsageMetric.PRIMARY to start, UsageMetric.PRIMARY to (start + day),
+                UsageMetric.VISIBLE to start, UsageMetric.VISIBLE to (start + 2 * day))
+            for ((metric, from) in ranges) {
+                val window = Window(from, from + 600)
+                val resolved = store.read(window, metric).slices
+                val expected = DailyMetrics.Accumulator(window, zone, Grain.DAY).also {
+                    it.addDay(DailyMetrics.cells(resolved, metric, window))
+                }.finish()
+                assertEquals(expected, store.aggregate(window, zone, Grain.DAY, metric, null))
+                if (metric == UsageMetric.PRIMARY) {
+                    assertTrue(resolved.any { it.reason == "PRIMARY_OVERLAP_CONFLICT" })
+                }
+            }
+            val malformed = Window(start + 2 * day, start + 2 * day + 600)
+            assertTrue(runCatching { store.aggregate(malformed, zone, Grain.DAY, UsageMetric.PRIMARY, null) }.isFailure)
+        } finally {
+            store.close()
+            context.deleteDatabase(name)
+        }
+    }
+
+    @Test fun primarySqlTotalsPreserveSourceVariantsTiesAndDayClipping(): Unit = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val name = "safety-test-statistics-${UUID.randomUUID()}.db"
+        val zone = ZoneId.of("UTC")
+        val day = 86_400_000L
+        val start = Dates.midnight(LocalDate.of(2026, 11, 16), zone)
+        val metric = UsageMetric.PRIMARY
+        fun slice(app: String?, from: Long, to: Long, sources: Set<EvidenceSource>,
+                  grade: Evidence = Evidence.CONFIRMED, pending: Boolean = false) =
+            DualCodec.stored(UsageSlice(metric, app, start + from, start + to, grade,
+                "FIXTURE", sources, emptySet(), provisional = pending))
+        val events = setOf(EvidenceSource.USAGE_EVENTS)
+        val own = setOf(EvidenceSource.OWN_WINDOW)
+        val db = Room.databaseBuilder(context, UsageDatabase::class.java, name).build()
+        try {
+            db.dual().slices(listOf(
+                slice("fixture.b", 100, 200, events),
+                slice("fixture.a", 220, 520, events),
+                slice("fixture.b", 540, 740, own, pending = true),
+                slice(null, day - 100, day + 100, events, Evidence.INFERRED, pending = true),
+                slice("fixture.b", day + 100, day + 400, events, Evidence.INFERRED),
+                slice("fixture.a", day + 400, day + 700, own, Evidence.INFERRED)
+            ))
+        } finally {
+            db.close()
+        }
+        val store = UsageStore(context, name)
+        try {
+            val whole = Window(start, start + 2 * day)
+            val clipped = Window(start + 150, start + day + 450)
+            for ((window, app, includeConfirmed) in listOf(
+                Triple(whole, null, true),
+                Triple(clipped, null, true),
+                Triple(clipped, "fixture.b", false)
+            )) {
+                val expected = DailyMetrics.Accumulator(window, zone, Grain.DAY, app, includeConfirmed = includeConfirmed)
+                for (slot in Reports.slots(window, zone, Grain.DAY)) {
+                    expected.addDay(DailyMetrics.cells(store.read(slot, metric).slices, metric, slot))
+                }
+                val report = store.aggregate(window, zone, Grain.DAY, metric, app, includeConfirmed)
+                assertEquals(expected.finish(), report)
+                if (window == whole) assertEquals(listOf("fixture.b", "fixture.a"), report.apps.map { it.app })
+            }
+        } finally {
+            store.close()
+            context.deleteDatabase(name)
+        }
+    }
+
     @Test fun clippedReportsPreserveResultsWithoutReplacingCompleteDiskBuckets(): Unit = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val name = "safety-test-statistics-${UUID.randomUUID()}.db"

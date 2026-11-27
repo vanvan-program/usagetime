@@ -11,7 +11,7 @@
 [![Kotlin](https://img.shields.io/badge/Kotlin%20%7C%20Compose%20%7C%20Room-7F52FF?style=flat-square)](#tech-stack--building-from-source)
 [![License](https://img.shields.io/badge/License-GPL--3.0--only-blue?style=flat-square)](LICENSE)
 
-[Latest Release](https://github.com/vanvan-program/usagetime/releases/latest) · [0.4.12 Release Notes (Chinese)](docs/RELEASE-0.4.12.md) · [Changelog](CHANGELOG.md) · [Desktop Sync](docs/SYNC.md) · [Metrics Spec](docs/STATISTICS-0.3.11.md) · [Database Notes](docs/DATABASE-0.3.12.md) · [Issues](https://github.com/vanvan-program/usagetime/issues)
+[Latest Release](https://github.com/vanvan-program/usagetime/releases/latest) · [0.4.13 Release Notes (Chinese)](docs/RELEASE-0.4.13.md) · [Changelog](CHANGELOG.md) · [Desktop Sync](docs/SYNC.md) · [Metrics Spec](docs/STATISTICS-0.3.11.md) · [Database Notes](docs/DATABASE-0.3.12.md) · [Issues](https://github.com/vanvan-program/usagetime/issues)
 
 </div>
 

@@ -5,6 +5,7 @@ import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import androidx.core.content.edit
 import android.os.Process
 import android.os.SystemClock
@@ -337,19 +338,75 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
     /** One reader per transaction, with the index boundary loaded only if raw detail is needed. */
     private inner class ObservationReader(private val metric:UsageMetric){
         private var midpoint:Long?=null
+        private val validatedSources=hashSetOf("")
 
-        suspend fun read(window:Window):List<UsageSlice>{
+        private suspend fun useRecentIndex(window:Window):Boolean{
             val recentFrom=midpoint?:run{
                 val first=dual.first();val last=dual.lastIntervalEnd()
                 // Imported detail can have no local checkpoint. Use the actual interval bounds.
                 (if(first!=null&&last!=null)first+(last-first)/2 else Long.MAX_VALUE).also{midpoint=it}
             }
-            val values=if(window.start>=recentFrom)dual.recentSlices(window.start,window.end,metric.name)
+            return window.start>=recentFrom
+        }
+
+        suspend fun read(window:Window):List<UsageSlice>{
+            val values=if(useRecentIndex(window))dual.recentSlices(window.start,window.end,metric.name)
                 else dual.slices(window.start,window.end,metric.name)
             return DualCodec.effective(values)
         }
 
-        suspend fun cells(window:Window):List<MetricDayCell> = DailyMetrics.cells(read(window),metric,window)
+        private fun validateSources(sources:String){
+            if(sources in validatedSources)return
+            sources.split(',').filter{it.isNotEmpty()}.forEach{EvidenceSource.valueOf(it)}
+            validatedSources+=sources
+        }
+
+        suspend fun dayCells(window:Window):List<MetricDayCell>{
+            // Android 10 can ship SQLite without window functions.
+            if(metric!=UsageMetric.PRIMARY||Build.VERSION.SDK_INT<Build.VERSION_CODES.R)return cells(window)
+            val groups=if(useRecentIndex(window))dual.recentPrimarySliceTotals(window.start,window.end)
+                else dual.primarySliceTotals(window.start,window.end)
+            if(groups.any{it.unsafe})return DailyMetrics.cells(read(window),metric,window)
+
+            // Exclusive intervals need only sums. Merge source variants in first-occurrence order.
+            val totals=linkedMapOf<Pair<String?,Evidence>,LongArray>()
+            var observed=0L
+            var provisional=0L
+            for(group in groups){
+                validateSources(group.sources)
+                val evidence=Evidence.valueOf(group.evidence)
+                val durations=totals.getOrPut(group.app to evidence){LongArray(2)}
+                durations[0]+=group.millis
+                durations[1]+=group.provisionalMillis
+                provisional+=group.provisionalMillis
+                if(evidence==Evidence.CONFIRMED)observed+=group.millis-group.provisionalMillis
+            }
+            return buildList(totals.size+2){
+                totals.forEach{(key,durations)->
+                    add(MetricDayCell(window.start,window.end,key.first,key.second,durations[0],durations[1]))
+                }
+                add(MetricDayCell(window.start,window.end,DailyMetrics.SUMMARY,Evidence.UNKNOWN,window.duration-observed,provisional))
+                add(MetricDayCell(window.start,window.end,DailyMetrics.OBSERVED,Evidence.CONFIRMED,observed,0))
+            }
+        }
+
+        suspend fun cells(window:Window):List<MetricDayCell>{
+            val measures=if(useRecentIndex(window))dual.recentSliceMeasures(window.start,window.end,metric.name)
+                else dual.sliceMeasures(window.start,window.end,metric.name)
+            var lastEnd=Long.MIN_VALUE
+            for(row in measures){
+                // Resolve archived data and conflicting primary intervals against their original proof references.
+                if(row.algorithm!=2||metric==UsageMetric.PRIMARY&&row.start<lastEnd)
+                    return DailyMetrics.cells(read(window),metric,window)
+                lastEnd=row.end
+            }
+            val durations=measures.map{row->
+                validateSources(row.sources)
+                // The report uses the evidence grade, duration and pending state. Full detail uses read().
+                UsageSlice(metric,row.app,row.start,row.end,Evidence.valueOf(row.evidence),"",emptySet(),emptySet(),row.provisional)
+            }
+            return DailyMetrics.cells(durations,metric,window)
+        }
     }
     private suspend fun readInsideTransaction(window:Window,metric:UsageMetric):Records{
         val observations=ObservationReader(metric).read(window)
@@ -378,6 +435,35 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         "恢复前副本已删除，当前记录保留"
     }}
     private fun dayRows(cells:List<MetricDayCell>,metric:UsageMetric,zone:ZoneId)=cells.map{c->DailyUsage(DualCodec.hash("${c.start}|${zone.id}|$metric|${c.app}|${c.evidence}"),c.start,c.end,zone.id,metric.name,c.app,c.evidence.name,c.millis,c.provisional,3)}
+    /** Bulk insert within the report transaction. Bound parameter counts for older SQLite builds. */
+    private suspend fun cacheDailyRows(rows:List<DailyUsage>){
+        database.useWriterConnection{connection->
+            for(batch in rows.chunked(64)){
+                val values=batch.joinToString(","){"(?,?,?,?,?,?,?,?,?,?)"}
+                connection.usePrepared("""
+                    INSERT OR REPLACE INTO daily_usage
+                        (id,dayStart,dayEnd,zone,metric,app,evidence,millis,provisionalMillis,algorithm)
+                    VALUES $values
+                """.trimIndent()){statement->
+                    var index=1
+                    for(row in batch){
+                        statement.bindText(index++,row.id)
+                        statement.bindLong(index++,row.dayStart)
+                        statement.bindLong(index++,row.dayEnd)
+                        statement.bindText(index++,row.zone)
+                        statement.bindText(index++,row.metric)
+                        val app=row.app
+                        if(app==null)statement.bindNull(index++) else statement.bindText(index++,app)
+                        statement.bindText(index++,row.evidence)
+                        statement.bindLong(index++,row.millis)
+                        statement.bindLong(index++,row.provisionalMillis)
+                        statement.bindLong(index++,row.algorithm.toLong())
+                    }
+                    statement.step()
+                }
+            }
+        }
+    }
     private fun hourRows(cells:List<MetricDayCell>,metric:UsageMetric,zone:ZoneId)=cells.map{c->HourUsage(DualCodec.hash("hour|${c.start}|${zone.id}|$metric|${c.app}|${c.evidence}"),c.start,c.end,zone.id,metric.name,c.app,c.evidence.name,c.millis,c.provisional,3)}
     private fun monthRows(cells:List<MetricDayCell>,metric:UsageMetric,zone:ZoneId,recordedDays:Long)=cells.map{c->MonthUsage(DualCodec.hash("month|${c.start}|${zone.id}|$metric|${c.app}|${c.evidence}"),c.start,c.end,zone.id,metric.name,c.app,c.evidence.name,c.millis,c.provisional,recordedDays,3)}
     /** Per-report cache capacity; counts and floor stay in memory until a trim forces a refresh. */
@@ -408,12 +494,12 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
             }
         }
         require(slot.start>=floor){"此历史范围仅保留原记录时区的完整每日汇总，无法还原部分日期"}
-        val calculated=reader.cells(slot)
+        val calculated=reader.dayCells(slot)
         val date=Dates.date(slot.start,zone)
         if(slot.start==Dates.midnight(date,zone)&&slot.end==Dates.midnight(date.plusDays(1),zone)&&storageWritable()){
             prepareBudget(budget,zone,Grain.DAY)
             if(budget.allow(slot.start)){
-                dual.daily(dayRows(calculated,metric,zone))
+                cacheDailyRows(dayRows(calculated,metric,zone))
                 budget.record(calculated.size,slot.start)
                 if(budget.rows>500000){dual.trimCache(zone.id);budget.rows=dual.dailyCount();budget.floor=dual.cacheFirst(zone.id)}
             }
