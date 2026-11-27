@@ -97,6 +97,23 @@ class WidgetRenderingTest {
         }
     }
 
+    @Test fun newDefaultCategoriesRenderInBothWidgetThemes() {
+        val snapshot = fixture()
+        val addedCategories = snapshot.copy(today = snapshot.today.copy(apps = listOf(
+            AppTotal("org.mozilla.firefox", 80 * 60_000L),
+            AppTotal("com.einnovation.temu", 70 * 60_000L),
+            AppTotal("com.openai.chatgpt", 42 * 60_000L),
+        )))
+        assertEquals(listOf(AppCategory.BROWSE, AppCategory.LIFE, AppCategory.TOOLS),
+            addedCategories.categories.map { it.category })
+        instrumentation.runOnMainSync {
+            for (dark in listOf(false, true)) {
+                val rendered = render(WidgetStyle.CATEGORIES, 240, 180, addedCategories, dark)
+                assertEquals(3, rendered.findViewById<ViewGroup>(R.id.widget_rows).childCount)
+            }
+        }
+    }
+
     @Test fun resizeAndLargeFontFallbackDoNotLoseTotalOrShowFakeZero() {
         instrumentation.runOnMainSync {
             val empty = fixture().copy(today = fixture().today.copy(apps = emptyList(),

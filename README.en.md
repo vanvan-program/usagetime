@@ -11,7 +11,7 @@
 [![Kotlin](https://img.shields.io/badge/Kotlin%20%7C%20Compose%20%7C%20Room-7F52FF?style=flat-square)](#tech-stack--building-from-source)
 [![License](https://img.shields.io/badge/License-GPL--3.0--only-blue?style=flat-square)](LICENSE)
 
-[Latest Release](https://github.com/vanvan-program/usagetime/releases/latest) · [0.4.16 Release Notes (Chinese)](docs/RELEASE-0.4.16.md) · [Changelog](CHANGELOG.md) · [Desktop Sync](docs/SYNC.md) · [Metrics Spec](docs/STATISTICS-0.3.11.md) · [Database Notes](docs/DATABASE-0.3.12.md) · [Issues](https://github.com/vanvan-program/usagetime/issues)
+[Latest Release](https://github.com/vanvan-program/usagetime/releases/latest) · [0.4.17 Release Notes (Chinese)](docs/RELEASE-0.4.17.md) · [Changelog](CHANGELOG.md) · [Desktop Sync](docs/SYNC.md) · [Metrics Spec](docs/STATISTICS-0.3.11.md) · [Database Notes](docs/DATABASE-0.3.12.md) · [Issues](https://github.com/vanvan-program/usagetime/issues)
 
 </div>
 
@@ -30,6 +30,7 @@
   - Switch between **Primary Usage Time**, **Screen Visible Time**, and legacy history.
   - Explicitly surfaces *Confirmed*, *Candidate Estimate*, *Undetermined*, and *Unclosed* intervals rather than silently treating unknown gaps as zero.
 - **Rich Analytics & Visualizations**: Hourly/daily/monthly rollups, period comparisons, app rankings, search & details, automatic and manual app categorization, and a donut chart with time and share by category—backed by a bounded report cache.
+- **Automatic categories**: Built-in rules for 300 Android package IDs cover categories including Browsing, Lifestyle, and Tools. Manual assignments take precedence and can be reset to the default.
 - **5 Home Screen Widgets**: Quick Summary, Today Overview, Top Apps, Category Breakdown, and 7-Day Trend.
 - **Desktop Usage Dashboard** *(off by default)*: Displays encrypted desktop app summaries (top apps, categories, 7-day trend) independently from phone data.
 - **Dual-Tier Storage & Full Backups**:

@@ -18,6 +18,7 @@ import android.widget.RemoteViews
 import androidx.core.graphics.createBitmap
 import androidx.core.graphics.toColorInt
 import androidx.core.net.toUri
+import dev.usagetime.core.AppCategory
 import dev.usagetime.core.Dates
 import dev.usagetime.core.durationText
 import java.time.Instant
@@ -37,13 +38,17 @@ class WidgetRenderer(private val context: Context, private val darkOverride: Boo
     private val accent = (if (dark) "#B7A7FF" else "#6650C8").toColorInt()
     private val track = (if (dark) "#4B435D" else "#DED7EE").toColorInt()
     private val warning = (if (dark) "#F6C66D" else "#805400").toColorInt()
-    private val categoryColors = if (dark) intArrayOf(
-        "#B7A7FF".toColorInt(), "#91BFFF".toColorInt(), "#FFABD1".toColorInt(),
-        "#F1C478".toColorInt(), "#8CD4B3".toColorInt(), "#B5AEC1".toColorInt()
-    ) else intArrayOf(
-        "#6650C8".toColorInt(), "#356BB0".toColorInt(), "#AF4D7B".toColorInt(),
-        "#926315".toColorInt(), "#287553".toColorInt(), "#766D87".toColorInt()
-    )
+    private fun categoryColor(category: AppCategory): Int = when (category) {
+        AppCategory.STUDY -> if (dark) "#B7A7FF" else "#6650C8"
+        AppCategory.WORK -> if (dark) "#91BFFF" else "#356BB0"
+        AppCategory.SOCIAL -> if (dark) "#FFABD1" else "#AF4D7B"
+        AppCategory.VIDEO -> if (dark) "#F1C478" else "#926315"
+        AppCategory.GAME -> if (dark) "#8CD4B3" else "#287553"
+        AppCategory.BROWSE -> if (dark) "#59D4ED" else "#167F99"
+        AppCategory.LIFE -> if (dark) "#B3D878" else "#658621"
+        AppCategory.TOOLS -> if (dark) "#F0A27E" else "#B55C36"
+        AppCategory.OTHER -> if (dark) "#B5AEC1" else "#766D87"
+    }.toColorInt()
 
     fun render(
         requested: WidgetStyle, id: Int, options: Bundle, snapshot: WidgetSnapshot,
@@ -97,7 +102,7 @@ class WidgetRenderer(private val context: Context, private val darkOverride: Boo
                 snapshot.categories.take(rowCount).forEach { category ->
                     views.addView(R.id.widget_rows, row(
                         category.category.label, compactWidgetDuration(category.millis),
-                        widgetShare(category.millis, snapshot.today.total), categoryColors[category.category.ordinal], null
+                        widgetShare(category.millis, snapshot.today.total), categoryColor(category.category), null
                     ))
                 }
                 val remainder = snapshot.categories.drop(rowCount)
@@ -293,7 +298,7 @@ class WidgetRenderer(private val context: Context, private val darkOverride: Boo
         var angle = -90f
         if (snapshot.today.total > 0) snapshot.categories.forEach { category ->
             val sweep = category.millis.toDouble() / snapshot.today.total * 360
-            paint.color = categoryColors[category.category.ordinal]
+            paint.color = categoryColor(category.category)
             canvas.drawArc(bounds, angle, sweep.toFloat(), false, paint)
             angle += sweep.toFloat()
         }
@@ -313,7 +318,7 @@ class WidgetRenderer(private val context: Context, private val darkOverride: Boo
         days.forEachIndexed { index, day ->
             val center = 60f + index * 120
             val height = if (day.available) (day.millis.toDouble() / maximum * 96).toFloat() else 0f
-            paint.color = if (index == 6) accent else categoryColors[1]
+            paint.color = if (index == 6) accent else categoryColor(AppCategory.WORK)
             if (day.available && day.millis > 0) {
                 canvas.drawRoundRect(center - 24, 142f - height, center + 24, 142f, 6f, 6f, paint)
             } else if (day.available) {

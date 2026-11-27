@@ -332,6 +332,9 @@ private fun HindsightColors.categoryColor(category: AppCategory): Color = when (
     AppCategory.SOCIAL -> accent
     AppCategory.VIDEO -> rose
     AppCategory.GAME -> gold
+    AppCategory.BROWSE -> if (dark) Color(0xFF59D4ED) else Color(0xFF167F99)
+    AppCategory.LIFE -> if (dark) Color(0xFFB3D878) else Color(0xFF658621)
+    AppCategory.TOOLS -> peach
     AppCategory.OTHER -> textFaint
 }
 

@@ -10,8 +10,8 @@ android {
         applicationId = "dev.usagetime.app"
         minSdk = 29
         targetSdk = 36
-        versionCode = 45
-        versionName = "0.4.16"
+        versionCode = 46
+        versionName = "0.4.17"
         val currentVersion = requireNotNull(versionName)
         val updateNotes = providers.fileContents(rootProject.layout.projectDirectory.file("CHANGELOG.md"))
             .asText.get().lineSequence()

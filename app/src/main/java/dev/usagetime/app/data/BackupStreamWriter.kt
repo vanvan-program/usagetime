@@ -40,7 +40,14 @@ internal object BackupStreamWriter {
         if (categories.isNotEmpty()) {
             writer.name("app_categories").beginArray()
             categories.forEach { (app, category) ->
-                writer.beginObject().name("app").value(app).name("category").value(category.name).endObject()
+                // Keep the base value readable by releases that only knew the original categories.
+                val fallback = when (category) {
+                    AppCategory.BROWSE, AppCategory.LIFE, AppCategory.TOOLS -> AppCategory.OTHER
+                    else -> category
+                }
+                writer.beginObject().name("app").value(app).name("category").value(fallback.name)
+                if (fallback != category) writer.name("extended_category").value(category.name)
+                writer.endObject()
             }
             writer.endArray()
         }

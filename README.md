@@ -11,7 +11,7 @@
 [![Kotlin](https://img.shields.io/badge/Kotlin%20%7C%20Compose%20%7C%20Room-7F52FF?style=flat-square)](#技术栈与从源码构建)
 [![License](https://img.shields.io/badge/License-GPL--3.0--only-blue?style=flat-square)](LICENSE)
 
-[下载最新正式版](https://github.com/vanvan-program/usagetime/releases/latest) · [0.4.16 更新说明](docs/RELEASE-0.4.16.md) · [历史更新记录](CHANGELOG.md) · [桌面同步说明](docs/SYNC.md) · [统计口径说明](docs/STATISTICS-0.3.11.md) · [数据库说明](docs/DATABASE-0.3.12.md) · [问题反馈](https://github.com/vanvan-program/usagetime/issues)
+[下载最新正式版](https://github.com/vanvan-program/usagetime/releases/latest) · [0.4.17 更新说明](docs/RELEASE-0.4.17.md) · [历史更新记录](CHANGELOG.md) · [桌面同步说明](docs/SYNC.md) · [统计口径说明](docs/STATISTICS-0.3.11.md) · [数据库说明](docs/DATABASE-0.3.12.md) · [问题反馈](https://github.com/vanvan-program/usagetime/issues)
 
 </div>
 
@@ -30,6 +30,7 @@
   - 支持「主要使用时间」「屏幕可见时间」及旧版历史三种口径切换。
   - 区分「已确认 / 候选估计 / 无法确定 / 未闭合」状态，明确标注证据质量，不把未知时间当作零。
 - **多维报表与可视化**：支持按小时 / 日 / 月汇总、趋势对比、应用排行、搜索详情、按应用自动或手动归类、分类用时和占比环形图；内置报表缓存以提升浏览流畅度。
+- **自动分类**：内置 300 个 Android 包名，支持浏览、生活、工具等分类。手动分类优先，可随时恢复默认。
 - **五款桌面小组件**：用时速览、今日概览、应用排行、分类分布、七日趋势。
 - **电脑用时独立看板**（默认关闭）：按需从 WebDAV 拉取端到端加密的桌面应用汇总，独立展示排行、分类分布与近七日趋势。
 - **双层存储与完整备份**：

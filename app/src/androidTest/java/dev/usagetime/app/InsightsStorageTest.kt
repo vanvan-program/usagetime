@@ -26,19 +26,24 @@ class InsightsStorageTest {
 
     @Test fun categoriesUseAnOptionalV3ExtensionAndReadBackWithoutChangingHistoryTables() = runBlocking {
         val output = ByteArrayOutputStream()
-        BackupStreamWriter.write(output, mapOf("fixture.category" to AppCategory.STUDY)) { MatrixCursor(arrayOf("id")) }
+        val categories = mapOf("fixture.category" to AppCategory.STUDY, "fixture.browser" to AppCategory.BROWSE)
+        BackupStreamWriter.write(output, categories) { MatrixCursor(arrayOf("id")) }
         val json = JSONObject(output.toString("UTF-8"))
         assertEquals(3, json.getInt("version"))
         val values = mutableMapOf<String, String>()
+        val extensions = mutableMapOf<String, String>()
         BackupStreamReader.read(output.toByteArray().inputStream(), object : BackupStreamReader.Sink {
             override suspend fun row(table: String, row: JSONObject) {
                 assertEquals("app_categories", table)
-                values[row.getString("app")] = row.getString("category")
+                val app = row.getString("app")
+                values[app] = row.getString("category")
+                if (row.has("extended_category")) extensions[app] = row.getString("extended_category")
             }
             override suspend fun checkpoint() {}
             override suspend fun endArray(table: String) {}
         })
-        assertEquals(mapOf("fixture.category" to "STUDY"), values)
+        assertEquals(mapOf("fixture.category" to "STUDY", "fixture.browser" to "OTHER"), values)
+        assertEquals(mapOf("fixture.browser" to "BROWSE"), extensions)
     }
 
     @Test fun categoryImportPreservesExistingAssignmentsAndRejectsInvalidBackup() = runBlocking {
@@ -47,10 +52,12 @@ class InsightsStorageTest {
         val store = UsageStore(context, name)
         try {
             preferences.save("fixture.existing", AppCategory.WORK)
-            val valid = """{"format":"usagetime-backup","version":3,"app_categories":[{"app":"fixture.existing","category":"GAME"},{"app":"fixture.new","category":"STUDY"}]}"""
+            val valid = """{"format":"usagetime-backup","version":3,"app_categories":[{"app":"fixture.existing","category":"GAME"},{"app":"fixture.new","category":"STUDY"},{"app":"fixture.life","category":"OTHER","extended_category":"LIFE"},{"app":"fixture.future","category":"OTHER","extended_category":"UNSUPPORTED"}]}"""
             store.importJson(valid)
             assertEquals(AppCategory.WORK, preferences.read()["fixture.existing"])
             assertEquals(AppCategory.STUDY, preferences.read()["fixture.new"])
+            assertEquals(AppCategory.LIFE, preferences.read()["fixture.life"])
+            assertEquals(AppCategory.OTHER, preferences.read()["fixture.future"])
             val before = preferences.read()
             val invalid = valid.replace("\"version\":3", "\"version\":99").replace("STUDY", "VIDEO")
             assertTrue(runCatching { store.importJson(invalid) }.isFailure)

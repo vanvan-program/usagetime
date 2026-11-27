@@ -1035,7 +1035,9 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
                     "app_categories"->{
                         val app=row.getString("app")
                         require(app.isNotBlank()&&app.length<=255&&importedCategories.size<10000)
-                        importedCategories[app]=AppCategory.valueOf(row.getString("category"))
+                        val fallback = AppCategory.valueOf(row.getString("category"))
+                        val extended = row.optString("extended_category")
+                        importedCategories[app] = AppCategory.entries.firstOrNull { it.name == extended } ?: fallback
                     }
                     "intervals"->{val value=decoder.interval(row);batches.addInterval(value,value.app.length*2L+64);imported++}
                     "coverage"->{val value=decoder.coverage(row);dao.coverage(listOf(value));if(value.reliable)dao.upgradeCoverage(value.start,value.end)}

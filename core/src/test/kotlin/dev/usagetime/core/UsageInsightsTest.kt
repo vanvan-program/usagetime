@@ -31,6 +31,20 @@ class UsageInsightsTest {
         )
     }
 
+    @Test fun expandedCategoriesApplyToHistoricalPackagesWithManualPrecedence() {
+        val browser = "org.mozilla.firefox"
+        val shopping = "com.einnovation.temu"
+        val tool = "com.openai.chatgpt"
+        val apps = listOf(AppTotal(browser, 60), AppTotal(shopping, 30), AppTotal(tool, 10))
+        assertEquals(
+            listOf(CategoryTotal(AppCategory.BROWSE, 60, 1), CategoryTotal(AppCategory.LIFE, 30, 1),
+                CategoryTotal(AppCategory.TOOLS, 10, 1)),
+            UsageInsights.categories(apps, emptyMap())
+        )
+        assertEquals(AppCategory.STUDY, UsageInsights.categoryFor(tool, mapOf(tool to AppCategory.STUDY)))
+        assertEquals(AppCategory.OTHER, UsageInsights.categoryFor("org.mozilla.firefox.fake", emptyMap()))
+    }
+
     @Test fun timelineClipsMergesWithoutPromotingEvidenceAndRetainsMissingRanges() {
         val result = UsageInsights.timeline(listOf(slice("a", 5, 20), slice("a", 20, 30),
             slice("a", 30, 35, Evidence.CONFIRMED), slice(null, 40, 45, Evidence.UNKNOWN),
