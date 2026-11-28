@@ -1,9 +1,10 @@
 package dev.usagetime.app
 
+import android.graphics.LinearGradient
 import android.graphics.Paint
+import android.graphics.Shader
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
@@ -34,6 +35,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -62,6 +64,8 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
+private const val DETAILED_BUCKET_LIMIT = 32
+
 private val TOP_HOUR_STEPS = doubleArrayOf(
     0.5, 1.0, 2.0, 4.0, 6.0, 8.0, 12.0, 18.0, 24.0,
     48.0, 96.0, 192.0, 384.0, 768.0, 1536.0
@@ -87,13 +91,16 @@ fun UsageChart(left: List<Bucket>, right: List<Bucket>? = null, line: Boolean = 
                 ?: (count - 1)
         )
     }
-    var entered by remember(left, right, line) { mutableStateOf(false) }
-    LaunchedEffect(left, right, line) { entered = true }
-    val reveal by animateFloatAsState(
-        targetValue = if (entered) 1f else 0f,
-        animationSpec = tween(440),
-        label = "chartReveal"
-    )
+    var entered by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { entered = true }
+    // Dense charts would repaint thousands of marks on every reveal frame.
+    val reveal = if (count <= DETAILED_BUCKET_LIMIT) {
+        animateFloatAsState(
+            targetValue = if (entered) 1f else 0f,
+            animationSpec = tween(220),
+            label = "chartReveal"
+        )
+    } else null
 
     val density = LocalDensity.current
     val textSize = with(density) { 10.sp.toPx() }
@@ -166,7 +173,7 @@ fun UsageChart(left: List<Bucket>, right: List<Bucket>? = null, line: Boolean = 
     val chartDescription = "${if (line) "折线图" else "柱状图"}。$selectedLabel，$selectedValue。"
 
     Column {
-        Canvas(
+        Spacer(
             Modifier
                 .fillMaxWidth()
                 .height(190.dp)
@@ -192,179 +199,197 @@ fun UsageChart(left: List<Bucket>, right: List<Bucket>? = null, line: Boolean = 
                             .coerceIn(0, count - 1)
                     }
                 }
-        ) {
-            val leftInset = 42.dp.toPx()
-            val rightInset = 8.dp.toPx()
-            val topInset = 10.dp.toPx()
-            val bottomInset = 27.dp.toPx()
-            val chartWidth = (size.width - leftInset - rightInset).coerceAtLeast(1f)
-            val chartHeight = (size.height - topInset - bottomInset).coerceAtLeast(1f)
-            val slot = chartWidth / count
+                .drawWithCache {
+                    val leftInset = 42.dp.toPx()
+                    val rightInset = 8.dp.toPx()
+                    val topInset = 10.dp.toPx()
+                    val bottomInset = 27.dp.toPx()
+                    val chartWidth = (size.width - leftInset - rightInset).coerceAtLeast(1f)
+                    val chartHeight = (size.height - topInset - bottomInset).coerceAtLeast(1f)
+                    val baseline = topInset + chartHeight
+                    val slot = chartWidth / count
 
-            fun x(index: Int) = leftInset + slot * (index + 0.5f)
-            fun y(value: Long) = topInset + chartHeight - (value.toDouble() / maxMs * chartHeight).toFloat()
+                    fun x(index: Int) = leftInset + slot * (index + 0.5f)
+                    fun barHeight(millis: Long) = (millis.toDouble() / maxMs * chartHeight).toFloat()
+                    fun pointY(millis: Long, progress: Float) =
+                        baseline - barHeight(if (progress == 1f) millis else (millis * progress).toLong())
 
-            val selectedRectLeft = leftInset + slot * selected
-            drawRect(
-                color = c.accent.copy(alpha = if (c.dark) 0.09f else 0.055f),
-                topLeft = Offset(selectedRectLeft + slot * 0.08f, topInset),
-                size = Size(slot * 0.84f, chartHeight)
-            )
+                    val gridLines = (0..3).map { tick ->
+                        val value = topHours * tick / 3
+                        val label = when {
+                            tick == 0 -> "0"
+                            value < 1 -> "${(value * 60).roundToInt()}分"
+                            value == value.toLong().toDouble() -> "${value.toLong()}时"
+                            else -> "%.1f时".format(java.util.Locale.CHINA, value)
+                        }
+                        (baseline - chartHeight * tick / 3) to label
+                    }
+                    val axisLabels = labelIndices.map { index ->
+                        x(index) to (left.getOrNull(index) ?: right?.getOrNull(index))?.label.orEmpty()
+                    }
+                    val gridStrokeWidth = 1.dp.toPx()
+                    val labelStartX = 1.dp.toPx()
+                    val labelBaselineY = size.height - 5.dp.toPx()
+                    val dotRadius = 3.5.dp.toPx()
+                    val minBarHeight = 1.5.dp.toPx()
+                    val highlightMinHeight = 8.dp.toPx()
+                    val highlightInset = 3.dp.toPx()
+                    val highlightThickness = 2.dp.toPx()
+                    val bar = min(24.dp.toPx(), slot * if (right == null) 0.58f else 0.34f)
+                    val corner = min(6.dp.toPx(), bar / 2)
+                    val singleCornerRadius = CornerRadius(corner, corner)
+                    val compareFill = c.peach.copy(alpha = 0.16f)
+                    val compareOutline = c.peach.copy(alpha = 0.72f)
+                    val selectionFill = c.accent.copy(alpha = if (c.dark) 0.09f else 0.055f)
 
-            paint.textAlign = Paint.Align.LEFT
-            val gridStrokeWidth = 1.dp.toPx()
-            val labelStartX = 1.dp.toPx()
-            for (i in 0..3) {
-                val value = topHours * i / 3
-                val at = topInset + chartHeight - chartHeight * i / 3
-                drawLine(
-                    color = c.borderSubtle,
-                    start = Offset(leftInset, at),
-                    end = Offset(size.width - rightInset, at),
-                    strokeWidth = gridStrokeWidth,
-                    pathEffect = gridDash
-                )
-                val label = when {
-                    i == 0 -> "0"
-                    value < 1 -> "${(value * 60).roundToInt()}分"
-                    value == value.toLong().toDouble() -> "${value.toLong()}时"
-                    else -> "%.1f时".format(java.util.Locale.CHINA, value)
-                }
-                drawContext.canvas.nativeCanvas.drawText(
-                    label,
-                    labelStartX,
-                    at + textSize * 0.35f,
-                    paint
-                )
-            }
+                    fun seriesPath(points: List<Bucket>, progress: Float): Path {
+                        val path = Path()
+                        var started = false
+                        points.forEachIndexed { index, bucket ->
+                            if (bucket.available) {
+                                val y = pointY(bucket.millis, progress)
+                                if (started) path.lineTo(x(index), y) else path.moveTo(x(index), y)
+                            }
+                            started = bucket.available
+                        }
+                        return path
+                    }
 
-            paint.textAlign = Paint.Align.CENTER
-            val labelBaselineY = size.height - 5.dp.toPx()
-            labelIndices.forEach { i ->
-                val label = (left.getOrNull(i) ?: right?.getOrNull(i))?.label ?: ""
-                drawContext.canvas.nativeCanvas.drawText(
-                    label,
-                    x(i),
-                    labelBaselineY,
-                    paint
-                )
-            }
+                    fun barHeights(points: List<Bucket>) = FloatArray(points.size) { index ->
+                        val bucket = points[index]
+                        if (bucket.available) barHeight(bucket.millis) else 0f
+                    }
 
-            fun drawBars() {
-                if (line) return
-                val minBarHeight = 1.5.dp.toPx()
-                val maxBarWidth = 24.dp.toPx()
-                val maxSingleRadius = 6.dp.toPx()
-                val highlightMinHeight = 8.dp.toPx()
-                val highlightInset = 3.dp.toPx()
-                val highlightThickness = 2.dp.toPx()
-                val bar = min(maxBarWidth, slot * if (right == null) 0.58f else 0.34f)
-                val singleCornerRadius = CornerRadius(min(maxSingleRadius, bar / 2), min(maxSingleRadius, bar / 2))
-                for (i in 0 until count) {
-                    val a = left.getOrNull(i)
-                    val b = right?.getOrNull(i)
-
-                    if (right == null) {
-                        if (a?.available == true) {
-                            val rawHeight = (a.millis.toDouble() / maxMs * chartHeight).toFloat()
-                            val height = (rawHeight * reveal).coerceAtLeast(if (a.millis > 0) minBarHeight else 0f)
-                            val center = x(i)
-                            drawRoundRect(
-                                brush = if (i == selected) selectedBarBrush else barBrush,
-                                topLeft = Offset(center - bar / 2, topInset + chartHeight - height),
-                                size = Size(bar, height),
-                                cornerRadius = singleCornerRadius
+                    val leftPath = if (line) seriesPath(left, 1f) else null
+                    val rightPath = if (line) right?.let { seriesPath(it, 1f) } else null
+                    val leftBars = if (line) null else barHeights(left)
+                    val rightBars = if (line) null else right?.let(::barHeights)
+                    // Subpixel bars share a screen column. Keep its peak, with selection on the original buckets.
+                    val denseBarSegments = if (reveal == null && right == null && leftBars != null && count > chartWidth) {
+                        val peaks = FloatArray(chartWidth.toInt().coerceAtLeast(1))
+                        leftBars.forEachIndexed { index, height ->
+                            val column = (slot * (index + 0.5f)).toInt().coerceAtMost(peaks.lastIndex)
+                            peaks[column] = max(peaks[column], height)
+                        }
+                        val segments = FloatArray(peaks.count { it > 0f } * 4)
+                        var next = 0
+                        peaks.forEachIndexed { column, height ->
+                            if (height > 0f) {
+                                val center = leftInset + column + 0.5f
+                                segments[next++] = center
+                                segments[next++] = baseline - height.coerceAtLeast(minBarHeight)
+                                segments[next++] = center
+                                segments[next++] = baseline
+                            }
+                        }
+                        segments
+                    } else null
+                    val denseBarPaint = denseBarSegments?.let {
+                        Paint().apply {
+                            strokeWidth = 1f
+                            shader = LinearGradient(
+                                0f, 0f, 0f, size.height.coerceAtLeast(1f),
+                                c.accent.copy(alpha = 0.88f).toArgb(),
+                                c.accent.copy(alpha = 0.42f).toArgb(),
+                                Shader.TileMode.CLAMP
                             )
-                            if (i == selected && height > highlightMinHeight) {
+                        }
+                    }
+
+                    onDrawBehind {
+                        val progress = reveal?.value ?: 1f
+                        val selectedIndex = selected
+                        drawRect(
+                            color = selectionFill,
+                            topLeft = Offset(leftInset + slot * (selectedIndex + 0.08f), topInset),
+                            size = Size(slot * 0.84f, chartHeight)
+                        )
+
+                        paint.textAlign = Paint.Align.LEFT
+                        val canvas = drawContext.canvas.nativeCanvas
+                        gridLines.forEach { (at, label) ->
+                            drawLine(
+                                color = c.borderSubtle,
+                                start = Offset(leftInset, at),
+                                end = Offset(size.width - rightInset, at),
+                                strokeWidth = gridStrokeWidth,
+                                pathEffect = gridDash
+                            )
+                            canvas.drawText(label, labelStartX, at + textSize * 0.35f, paint)
+                        }
+                        paint.textAlign = Paint.Align.CENTER
+                        axisLabels.forEach { (at, label) ->
+                            canvas.drawText(label, at, labelBaselineY, paint)
+                        }
+
+                        fun drawSeries(points: List<Bucket>, fullPath: Path, color: Color, dashed: Boolean) {
+                            drawPath(
+                                if (progress == 1f) fullPath else seriesPath(points, progress),
+                                color,
+                                style = if (dashed) dashedLineStroke else solidLineStroke
+                            )
+                            if (count > DETAILED_BUCKET_LIMIT) return
+                            points.forEachIndexed { index, bucket ->
+                                if (bucket.available) {
+                                    val point = Offset(x(index), pointY(bucket.millis, progress))
+                                    drawCircle(if (dashed) c.card else color, dotRadius, point)
+                                    if (dashed) drawCircle(color, dotRadius, point, style = dotRingStroke)
+                                }
+                            }
+                        }
+
+                        fun drawLeftBar(index: Int, rawHeight: Float) {
+                            if (rawHeight <= 0f) return
+                            val center = x(index)
+                            val height = (rawHeight * progress).coerceAtLeast(minBarHeight)
+                            val inset = if (right == null) bar / 2 else bar * 1.05f
+                            val brush = when {
+                                right != null -> compareBarBrush
+                                index == selectedIndex -> selectedBarBrush
+                                else -> barBrush
+                            }
+                            drawRoundRect(
+                                brush = brush,
+                                topLeft = Offset(center - inset, baseline - height),
+                                size = Size(bar, height),
+                                cornerRadius = if (right == null) singleCornerRadius else compareCorner
+                            )
+                            if (right == null && index == selectedIndex && height > highlightMinHeight) {
                                 drawRoundRect(
                                     color = Color.White.copy(alpha = 0.32f),
-                                    topLeft = Offset(center - bar * 0.26f, topInset + chartHeight - height + highlightInset),
+                                    topLeft = Offset(center - bar * 0.26f, baseline - height + highlightInset),
                                     size = Size(bar * 0.52f, highlightThickness),
                                     cornerRadius = highlightCorner
                                 )
                             }
                         }
-                    } else {
-                        val leftBar = a?.takeIf { it.available && it.millis > 0 }?.let {
-                            ((it.millis.toDouble() / maxMs * chartHeight).toFloat() * reveal).coerceAtLeast(minBarHeight)
-                        }
-                        val rightBar = b?.takeIf { it.available && it.millis > 0 }?.let {
-                            ((it.millis.toDouble() / maxMs * chartHeight).toFloat() * reveal).coerceAtLeast(minBarHeight)
-                        }
-                        val center = x(i)
-                        if (leftBar != null) {
-                            drawRoundRect(
-                                brush = compareBarBrush,
-                                topLeft = Offset(center - bar * 1.05f, topInset + chartHeight - leftBar),
-                                size = Size(bar, leftBar.coerceAtLeast(minBarHeight)),
-                                cornerRadius = compareCorner
-                            )
-                        }
-                        if (rightBar != null) {
-                            val h = rightBar.coerceAtLeast(minBarHeight)
-                            drawRoundRect(
-                                color = c.peach.copy(alpha = 0.72f),
-                                topLeft = Offset(center + bar * 0.05f, topInset + chartHeight - rightBar),
-                                size = Size(bar, h),
-                                cornerRadius = compareCorner,
-                                style = compareStroke
-                            )
-                            drawRoundRect(
-                                color = c.peach.copy(alpha = 0.16f),
-                                topLeft = Offset(center + bar * 0.05f, topInset + chartHeight - rightBar),
-                                size = Size(bar, h),
-                                cornerRadius = compareCorner
-                            )
-                        }
-                    }
-                }
-            }
 
-            fun drawSeries() {
-                if (!line) return
-                val dotRadius = 3.5.dp.toPx()
-                fun series(points: List<Bucket>, color: Color, dashed: Boolean) {
-                    val path = Path()
-                    var started = false
-                    points.forEachIndexed { index, bucket ->
-                        if (!bucket.available) {
-                            started = false
-                            return@forEachIndexed
-                        }
-                        val px = x(index)
-                        val py = y((bucket.millis * reveal).toLong())
-                        if (!started) {
-                            path.moveTo(px, py)
-                            started = true
-                        } else {
-                            path.lineTo(px, py)
-                        }
-                    }
-                    drawPath(
-                        path,
-                        color,
-                        style = if (dashed) dashedLineStroke else solidLineStroke
-                    )
-                    if (count <= 32) {
-                        points.forEachIndexed { index, bucket ->
-                            if (bucket.available) {
-                                val point = Offset(x(index), y((bucket.millis * reveal).toLong()))
-                                drawCircle(if (dashed) c.card else color, dotRadius, point)
-                                if (dashed) {
-                                    drawCircle(color, dotRadius, point, style = dotRingStroke)
+                        if (leftPath != null) {
+                            drawSeries(left, leftPath, c.accent, dashed = false)
+                            if (right != null && rightPath != null) {
+                                drawSeries(right, rightPath, c.peach, dashed = true)
+                            }
+                        } else if (leftBars != null) {
+                            if (denseBarSegments != null && denseBarPaint != null) {
+                                canvas.drawLines(denseBarSegments, denseBarPaint)
+                                drawLeftBar(selectedIndex, leftBars[selectedIndex])
+                                return@onDrawBehind
+                            }
+                            for (index in 0 until count) {
+                                drawLeftBar(index, leftBars.getOrElse(index) { 0f })
+                                val rightHeight = rightBars?.getOrElse(index) { 0f } ?: 0f
+                                if (rightHeight > 0f) {
+                                    val height = (rightHeight * progress).coerceAtLeast(minBarHeight)
+                                    val position = Offset(x(index) + bar * 0.05f, baseline - height)
+                                    val dimensions = Size(bar, height)
+                                    drawRoundRect(compareOutline, position, dimensions, compareCorner, style = compareStroke)
+                                    drawRoundRect(compareFill, position, dimensions, compareCorner)
                                 }
                             }
                         }
                     }
                 }
-                series(left, c.accent, false)
-                right?.let { series(it, c.peach, true) }
-            }
-
-            drawBars()
-            drawSeries()
-        }
-
+        )
         Spacer(Modifier.height(8.dp))
         Row(
             Modifier

@@ -31,6 +31,39 @@ class SelectionTest {
             previous.copy(custom=previous.anchor.minusDays(1) to previous.anchor)
         ).forEach{assertTrue(it.copy(query="typing",line=true,nameSort=true).requiresReport(previous))}
     }
+    @Test fun sharedTabsReuseOnlyMatchingSummarySelections() {
+        val overview = Selection()
+        val apps = overview.copy(page = 1, query = "fixture", nameSort = true)
+        val categories = overview.copy(page = 4)
+        assertTrue(apps.isSharedReportTabChange(overview))
+        assertTrue(categories.isSharedReportTabChange(apps))
+        assertTrue(overview.isSharedReportTabChange(categories))
+
+        val incompatible = listOf(
+            apps.copy(detail = true, app = "fixture"),
+            overview.copy(page = 2),
+            overview.copy(page = 3),
+            apps.copy(anchor = apps.anchor.minusDays(1)),
+            apps.copy(metric = UsageMetric.VISIBLE),
+            apps.copy(legacy = true),
+            apps.copy(period = dev.usagetime.core.Period.MONTH)
+        )
+        incompatible.forEach { assertFalse(categories.isSharedReportTabChange(it)) }
+        assertFalse(overview.isSharedReportTabChange(overview))
+    }
+
+    @Test fun rollingPeriodsLandOnTodayWhenNextFullStepWouldOvershoot() {
+        val today = java.time.LocalDate.of(2026, 11, 28)
+        for (period in listOf(dev.usagetime.core.Period.DAYS7, dev.usagetime.core.Period.DAYS30)) {
+            val old = Selection(period = period, anchor = today.minusDays(2))
+            assertTrue(old.canStepForward(today))
+            val current = old.stepAnchor(1, today)
+            assertEquals(today, current.anchor)
+            assertFalse(current.canStepForward(today))
+            assertEquals(current, current.stepAnchor(-1, today).stepAnchor(1, today))
+        }
+    }
+
     @Test fun monthlyFollowsPreviousMonthAndPreservesManualCompareSelection(){
         val yesterday=java.time.LocalDate.of(2026,10,31);val today=yesterday.plusDays(1)
         val monthlyCurrent=Selection(monthly=true,anchor=yesterday,compareA=yesterday,compareB=yesterday.minusMonths(1))
@@ -44,17 +77,17 @@ class SelectionTest {
         val today=java.time.LocalDate.of(2026,11,15) // Sunday
         val weekSelection=Selection(period=dev.usagetime.core.Period.WEEK,anchor=java.time.LocalDate.of(2026,11,9)) // Monday of same week
         assertFalse(weekSelection.canStepForward(today))
-        val prevWeek=weekSelection.stepAnchor(-1)
+        val prevWeek=weekSelection.stepAnchor(-1,today)
         assertEquals(java.time.LocalDate.of(2026,11,2),prevWeek.anchor)
         assertTrue(prevWeek.canStepForward(today))
 
         val monthSelection=Selection(period=dev.usagetime.core.Period.MONTH,anchor=today.withDayOfMonth(1))
         assertFalse(monthSelection.canStepForward(today))
-        val prevMonth=monthSelection.stepAnchor(-1)
+        val prevMonth=monthSelection.stepAnchor(-1,today)
         assertEquals(java.time.LocalDate.of(2026,10,1),prevMonth.anchor)
         assertTrue(prevMonth.canStepForward(today))
 
-        assertEquals(today.minusDays(30),Selection(period=dev.usagetime.core.Period.DAYS30,anchor=today).stepAnchor(-1).anchor)
+        assertEquals(today.minusDays(30),Selection(period=dev.usagetime.core.Period.DAYS30,anchor=today).stepAnchor(-1,today).anchor)
         assertFalse(Selection(period=dev.usagetime.core.Period.ALL,anchor=today.minusDays(1)).canStepForward(today))
         assertFalse(Selection(period=dev.usagetime.core.Period.CUSTOM,anchor=today.minusDays(1)).canStepForward(today))
     }

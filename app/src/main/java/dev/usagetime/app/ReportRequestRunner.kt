@@ -13,6 +13,8 @@ internal class ReportRequestRunner<T>(
     private var job:Job?=null
     private var sequence=0
 
+    val isRunning: Boolean get() = job?.isActive == true
+
     fun cancel(){job?.cancel()}
     fun stop(){cancel();onComputing(false)}
     suspend fun join(){job?.join()}

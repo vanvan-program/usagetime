@@ -102,9 +102,21 @@ class UsageModel(application:Application,val store:dev.usagetime.app.data.UsageS
         }
         // These controls only render/filter the already loaded report, even while a query is running.
         if(selection.requiresReport(previous)){
+            if (canReuseReportForTab(previous)) {
+                reportSelection = selection
+                return
+            }
             if(selection.page==4)display=display.invalidateReport()
             reload()
         }
+    }
+    private fun canReuseReportForTab(previous: Selection): Boolean {
+        if (!selection.isSharedReportTabChange(previous) || loadError != null) return false
+        val currentZone = ZoneId.systemDefault()
+        val clock = if (demo) now else wallClock()
+        if (currentZone != zone || clock < now || Dates.date(clock, currentZone) != observedToday) return false
+        // An active request may still be displaying the previous date or metric.
+        return if (reportRequests.isRunning) display.report == null else display.report != null
     }
     fun navigate(page:Int){change{it.copy(page=if(page==5&&!showDesktopData)0 else page,detail=false,app=null,query="")}}
     fun openApp(pkg:String){change{it.copy(page=1,detail=true,app=pkg,line=true,period=if(it.page==2){if(it.monthly)Period.MONTH else Period.WEEK}else it.period,anchor=if(it.page==2)it.compareA else it.anchor)}}
@@ -226,7 +238,7 @@ class UsageModel(application:Application,val store:dev.usagetime.app.data.UsageS
         }
     }
     fun period(value:Period){change{it.copy(period=value,anchor=Dates.date(wallClock(),ZoneId.systemDefault()),grain=Grain.MONTH)}}
-    fun move(direction:Long){change{it.stepAnchor(direction)}}
+    fun move(direction:Long){change{it.stepAnchor(direction,Dates.date(now,zone))}}
     fun reload(){
         if(!demo)categories=categoryPreferences.read()
         val isDemo=demo;val clock=if(isDemo)now else wallClock();val z=ZoneId.systemDefault();val includeConfirmed=showConfirmed

@@ -16,19 +16,27 @@ data class Selection(
     val isReportPage: Boolean get() = page in 0..2 || page == 4
 
     fun requiresReport(previous:Selection)=copy(line=previous.line,query=previous.query,nameSort=previous.nameSort)!=previous
+    internal fun isSharedReportTabChange(previous: Selection): Boolean {
+        if (page == previous.page || !sharesSummaryReport || !previous.sharesSummaryReport) return false
+        return !copy(page = previous.page).requiresReport(previous)
+    }
+
+    private val sharesSummaryReport: Boolean get() = !detail && (page == 0 || page == 1 || page == 4)
+
     fun followCurrentDate(previous:LocalDate,today:LocalDate)=copy(
         anchor=if(anchor==previous)today else anchor,
         compareA=if(compareA==previous)today else compareA,
         compareB=if(compareA==previous&&compareB==(if(monthly)previous.minusMonths(1)else previous.minusWeeks(1)))
             (if(monthly)today.minusMonths(1)else today.minusWeeks(1))else compareB)
-    fun stepAnchor(direction:Long)=copy(
-        anchor=when(period){
-            Period.WEEK,Period.DAYS7->anchor.plusWeeks(direction)
-            Period.MONTH->anchor.plusMonths(direction)
-            Period.DAYS30->anchor.plusDays(30*direction)
-            else->anchor.plusDays(direction)
+    fun stepAnchor(direction: Long, today: LocalDate): Selection {
+        val target = when (period) {
+            Period.WEEK, Period.DAYS7 -> anchor.plusWeeks(direction)
+            Period.MONTH -> anchor.plusMonths(direction)
+            Period.DAYS30 -> anchor.plusDays(30 * direction)
+            else -> anchor.plusDays(direction)
         }
-    )
+        return copy(anchor = if (direction > 0) target.coerceAtMost(today) else target)
+    }
     fun canStepForward(today:LocalDate):Boolean{
         if(period==Period.ALL||period==Period.CUSTOM)return false
         val nextStart=when(period){
