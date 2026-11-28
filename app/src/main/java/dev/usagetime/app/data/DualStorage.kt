@@ -81,18 +81,25 @@ data class MonthMeasure(val monthStart:Long,val monthEnd:Long,val app:String?,va
           AND dayStart>=:start AND dayStart<:end GROUP BY dayStart,dayEnd ORDER BY dayStart,dayEnd
     """)
     suspend fun dailyTotals(start:Long,end:Long,zone:String,metric:String,selected:String?,includeConfirmed:Boolean):List<DayAggregate>
+    // A cache restored out of order may have smaller rowids on later dates.
     @Query("""
-        SELECT d.app,
-          SUM(CASE WHEN d.evidence='CONFIRMED' THEN d.millis ELSE 0 END) AS confirmed,
-          SUM(CASE WHEN d.evidence='INFERRED' THEN d.millis ELSE 0 END) AS inferred,
-          SUM(d.provisionalMillis) AS provisional
-        FROM daily_usage d WHERE d.zone=:zone AND d.metric=:metric AND d.algorithm=3
-          AND d.dayStart>=:start AND d.dayStart<:end AND d.app IS NOT NULL
-          AND d.app NOT IN ('__QUALITY_SUMMARY__','__CONFIRMED_COVERAGE__')
-          AND (:selected IS NULL OR d.app=:selected)
-        GROUP BY d.app ORDER BY MIN(d.dayStart),
-          (SELECT rowid FROM daily_usage f WHERE f.zone=:zone AND f.metric=:metric AND f.algorithm=3
-            AND f.dayStart>=:start AND f.dayStart<:end AND f.app=d.app ORDER BY f.dayStart,f.rowid LIMIT 1)
+        WITH totals AS (
+          SELECT app, MIN(dayStart) AS firstDay,
+            SUM(CASE WHEN evidence='CONFIRMED' THEN millis ELSE 0 END) AS confirmed,
+            SUM(CASE WHEN evidence='INFERRED' THEN millis ELSE 0 END) AS inferred,
+            SUM(provisionalMillis) AS provisional
+          FROM daily_usage WHERE zone=:zone AND metric=:metric AND algorithm=3
+            AND dayStart>=:start AND dayStart<:end AND app IS NOT NULL
+            AND app NOT IN ('__QUALITY_SUMMARY__','__CONFIRMED_COVERAGE__')
+            AND (:selected IS NULL OR app=:selected)
+          GROUP BY app
+        )
+        SELECT app,confirmed,inferred,provisional FROM totals
+        ORDER BY firstDay, (
+          SELECT f.rowid FROM daily_usage f WHERE f.dayStart=totals.firstDay
+            AND f.zone=:zone AND f.metric=:metric AND f.algorithm=3 AND f.app=totals.app
+          ORDER BY f.rowid LIMIT 1
+        )
     """)
     suspend fun dailyAppTotals(start:Long,end:Long,zone:String,metric:String,selected:String?):List<AppAggregate>
     @Query("SELECT dayStart,dayEnd,app,evidence,millis,provisionalMillis FROM daily_usage WHERE zone=:zone AND metric=:metric AND algorithm=3 AND dayStart>=:start AND dayStart<:end ORDER BY dayStart")
@@ -126,6 +133,7 @@ data class MonthMeasure(val monthStart:Long,val monthEnd:Long,val app:String?,va
     @Query("DELETE FROM usage_intervals WHERE start>=:start AND algorithm=2") suspend fun deleteRecent(start:Long)
     @Query("SELECT * FROM sync_checkpoints WHERE time<=:time AND algorithm=2 ORDER BY time DESC LIMIT 1") suspend fun checkpoint(time:Long):SyncCheckpoint?
     @Query("SELECT * FROM sync_checkpoints WHERE algorithm=2 ORDER BY time DESC LIMIT 1") suspend fun latest():SyncCheckpoint?
+    @Query("SELECT MAX(time) FROM sync_checkpoints WHERE algorithm=2") suspend fun latestTime():Long?
     @Query("SELECT state FROM sync_checkpoints WHERE time=-1 AND algorithm=0") suspend fun replayMetadata():String?
     @Query("SELECT state FROM sync_checkpoints WHERE time=-2 AND algorithm=0") suspend fun evidenceRevision():String?
     @Query("SELECT state FROM sync_checkpoints WHERE time=-3 AND algorithm=0") suspend fun ownClock():String?

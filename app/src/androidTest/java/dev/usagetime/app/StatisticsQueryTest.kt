@@ -288,7 +288,8 @@ class StatisticsQueryTest {
         val db=Room.databaseBuilder(context,UsageDatabase::class.java,name).build()
         try{
             db.withTransaction{
-                for((metric,days) in oracle)for(cells in days){
+                // Later dates have earlier rowids and reversed app order. Ties must follow day one.
+                for((metric,days) in oracle)for(cells in days.asReversed()){
                     db.dual().daily(cells.map{c->DailyUsage(UUID.randomUUID().toString(),c.start,c.end,zone.id,metric.name,c.app,c.evidence.name,c.millis,c.provisional,3)})
                 }
                 for(metric in UsageMetric.entries){
@@ -343,9 +344,11 @@ class StatisticsQueryTest {
         val start=LocalDate.of(2026,1,1)
         val window=Window(Dates.midnight(start,zone),Dates.midnight(start.plusDays(128),zone))
         val metric=UsageMetric.PRIMARY
-        val days=Reports.slots(window,zone,Grain.DAY).map{slot->
+        val days=Reports.slots(window,zone,Grain.DAY).mapIndexed{day,slot->
             (0 until 96).map{index->
-                MetricDayCell(slot.start,slot.end,"fixture.app$index",Evidence.INFERRED,1000L+index,0)
+                // Some apps first appear late and tie with an earlier cohort.
+                val app = if (index < 80) "fixture.app$index" else "fixture.cohort${day / 16}.app$index"
+                MetricDayCell(slot.start,slot.end,app,Evidence.INFERRED,1000L+index,0)
             }+listOf(
                 MetricDayCell(slot.start,slot.end,DailyMetrics.SUMMARY,Evidence.UNKNOWN,slot.duration,0),
                 MetricDayCell(slot.start,slot.end,DailyMetrics.OBSERVED,Evidence.CONFIRMED,0,0)
@@ -355,7 +358,9 @@ class StatisticsQueryTest {
         try{
             try{
                 db.withTransaction{
-                    days.forEachIndexed{index,cells->
+                    // A restored cache can have earlier dates inserted after later dates.
+                    for (index in days.indices.reversed()) {
+                        val cells = days[index]
                         if(index==112){
                             HistoryRetention.save(db,HistoryRetention.rows(cells,metric,zone),"LOCAL")
                         }else{

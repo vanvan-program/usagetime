@@ -325,7 +325,7 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         return ops.checkOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS,Process.myUid(),context.packageName)==AppOpsManager.MODE_ALLOWED
     }
     suspend fun first():Long?=withContext(Dispatchers.IO){mutex.withLock{listOfNotNull<Long>(dao.first(),dual.first(),dualHistory.first()).minOrNull()}}
-    suspend fun last():Long?=withContext(Dispatchers.IO){mutex.withLock{dual.latest()?.time?:dao.cursor()?.time}}
+    suspend fun last():Long?=withContext(Dispatchers.IO){mutex.withLock{dual.latestTime()?:dao.cursor()?.time}}
     private val attributedEvidence=java.util.EnumSet.of(Evidence.CONFIRMED,Evidence.INFERRED)
     suspend fun hasLegacy(window:Window):Boolean=withContext(Dispatchers.IO){mutex.withLock{
         if(knownNoLegacy==true)false
@@ -636,7 +636,7 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         if(!recording||!permitted())return@withLock
         ensureWriteSpace()
         val now=observedAt;val zone=ZoneId.systemDefault().id
-        if((dual.latest()?.time?:0)>System.currentTimeMillis()){log(now,"OWN_EVENT_CLOCK_QUARANTINED","Wall clock is behind saved boundary");return@withLock}
+        if((dual.latestTime()?:0)>System.currentTimeMillis()){log(now,"OWN_EVENT_CLOCK_QUARANTINED","Wall clock is behind saved boundary");return@withLock}
         val own=DualCodec.event(now,signal,context.packageName,activity,instance,EvidenceSource.OWN_WINDOW,zone).let{row->
             if(clock==null)row else row.copy(origin=DualCodec.encodeClock(clock))
         }
@@ -719,7 +719,7 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
         mutex.withLock{
         val acquiredAt=SystemClock.elapsedRealtime()
         if(recording&&dual.evidenceRevision()!="strict-evidence-0311"){
-            if(dual.latest()!=null&&dual.firstEvent()!=null)rebuildHistoryInsideLock()
+            if(dual.latestTime()!=null&&dual.firstEvent()!=null)rebuildHistoryInsideLock()
             else database.withTransaction{saveEvidenceRevision()}
         }
         if(!permitted()){
@@ -843,7 +843,7 @@ class UsageStore(private val context:Context,databaseName:String="usage-history.
     private class SyncTimings{var replayMs=0L;var summaryMs=0L;var replaySpan=0L;var replayStart=0L}
     /** Replay saved evidence, invalidate report caches and seal completed days in the caller's transaction. */
     private suspend fun recomputeInsideTransaction(now:Long,elapsed:Long,boot:String,zone:ZoneId,requestedStart:Long,cutCandidate:Long,homes:Set<String>,timings:SyncTimings,clockUncertainty:Long=0):Long?{
-        val previousEnd=dual.latest()?.time
+        val previousEnd=dual.latestTime()
         require(previousEnd==null||now>=previousEnd){"重放终点不能早于已处理边界"}
         val anchor=dual.checkpoint(requestedStart)
         val start=anchor?.time?:requestedStart
