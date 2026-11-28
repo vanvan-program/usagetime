@@ -20,7 +20,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -38,8 +38,8 @@ internal fun ComparisonPeriodPicker(
     onSelect: (LocalDate) -> Unit,
     today: LocalDate = LocalDate.now()
 ) {
-    var visibleMonth by remember(initial, monthly) { mutableStateOf(YearMonth.from(initial)) }
-    var choosingMonth by remember(monthly) { mutableStateOf(monthly) }
+    var visibleMonth by rememberSaveable(initial, monthly) { mutableStateOf(YearMonth.from(initial)) }
+    var choosingMonth by rememberSaveable(monthly) { mutableStateOf(monthly) }
     val selectedStart = comparisonPeriodStart(initial, monthly)
     val currentMonth = YearMonth.from(today)
     val colors = hindsightColors()
@@ -62,58 +62,17 @@ internal fun ComparisonPeriodPicker(
                         Text(if (monthly) "上月" else "上周")
                     }
                 }
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = {
-                        visibleMonth = if (choosingMonth) visibleMonth.minusYears(1) else visibleMonth.minusMonths(1)
-                    }) {
-                        Icon(
-                            Icons.AutoMirrored.Outlined.KeyboardArrowLeft,
-                            if (choosingMonth) "上一年" else "上一月"
-                        )
-                    }
-                    TextButton(
-                        onClick = { if (!monthly) choosingMonth = !choosingMonth },
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text(
-                            if (choosingMonth) "${visibleMonth.year}年"
-                            else "${visibleMonth.year}年${visibleMonth.monthValue}月"
-                        )
-                        if (!monthly) Icon(Icons.Outlined.ArrowDropDown, "切换年月选择")
-                    }
-                    IconButton(
-                        onClick = {
-                            visibleMonth = if (choosingMonth) visibleMonth.plusYears(1).coerceAtMost(currentMonth)
-                            else visibleMonth.plusMonths(1)
-                        },
-                        enabled = if (choosingMonth) visibleMonth.year < today.year else visibleMonth < currentMonth
-                    ) {
-                        Icon(
-                            Icons.AutoMirrored.Outlined.KeyboardArrowRight,
-                            if (choosingMonth) "下一年" else "下一月"
-                        )
-                    }
-                }
+                CalendarMonthHeader(
+                    visibleMonth, currentMonth, choosingMonth,
+                    onNavigate = { visibleMonth = it },
+                    onToggle = if (monthly) null else ({ choosingMonth = !choosingMonth })
+                )
                 if (choosingMonth) {
-                    (1..12).chunked(3).forEach { months ->
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            months.forEach { month ->
-                                val candidate = YearMonth.of(visibleMonth.year, month)
-                                val selected = if (monthly) candidate == YearMonth.from(initial) else candidate == visibleMonth
-                                androidx.compose.material3.FilterChip(
-                                    selected = selected,
-                                    onClick = {
-                                        if (monthly) select(candidate.atDay(1))
-                                        else {
-                                            visibleMonth = candidate
-                                            choosingMonth = false
-                                        }
-                                    },
-                                    enabled = candidate <= currentMonth,
-                                    label = { Text("${month}月") },
-                                    modifier = Modifier.weight(1f).heightIn(min = 48.dp)
-                                )
-                            }
+                    CalendarMonthGrid(visibleMonth.year, if (monthly) YearMonth.from(initial) else visibleMonth, currentMonth) { month ->
+                        if (monthly) select(month.atDay(1))
+                        else {
+                            visibleMonth = month
+                            choosingMonth = false
                         }
                     }
                 } else {
@@ -134,4 +93,51 @@ internal fun ComparisonPeriodPicker(
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("取消") } }
     )
+}
+
+@Composable
+internal fun CalendarMonthHeader(
+    visible: YearMonth,
+    latest: YearMonth,
+    choosingMonth: Boolean,
+    onNavigate: (YearMonth) -> Unit,
+    onToggle: (() -> Unit)?
+) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        IconButton(onClick = { onNavigate(if (choosingMonth) visible.minusYears(1) else visible.minusMonths(1)) }) {
+            Icon(Icons.AutoMirrored.Outlined.KeyboardArrowLeft, if (choosingMonth) "上一年" else "上一月")
+        }
+        val label = if (choosingMonth) "${visible.year}年" else "${visible.year}年${visible.monthValue}月"
+        androidx.compose.foundation.layout.Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+            if (onToggle == null) Text(label, style = MaterialTheme.typography.titleSmall)
+            else TextButton(onClick = onToggle) {
+                Text(label)
+                Icon(Icons.Outlined.ArrowDropDown, "切换年月选择")
+            }
+        }
+        IconButton(
+            onClick = { onNavigate(if (choosingMonth) visible.plusYears(1).coerceAtMost(latest) else visible.plusMonths(1)) },
+            enabled = if (choosingMonth) visible.year < latest.year else visible < latest
+        ) {
+            Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, if (choosingMonth) "下一年" else "下一月")
+        }
+    }
+}
+
+@Composable
+internal fun CalendarMonthGrid(year: Int, selected: YearMonth, latest: YearMonth, onSelect: (YearMonth) -> Unit) {
+    (1..12).chunked(3).forEach { months ->
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            months.forEach { number ->
+                val month = YearMonth.of(year, number)
+                androidx.compose.material3.FilterChip(
+                    selected = month == selected,
+                    onClick = { onSelect(month) },
+                    enabled = month <= latest,
+                    label = { Text("${number}月") },
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp)
+                )
+            }
+        }
+    }
 }

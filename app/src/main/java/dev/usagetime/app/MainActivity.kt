@@ -214,6 +214,11 @@ fun UsageApp(model: UsageModel = viewModel(), widgetNavigation: WidgetNavigation
         diagnosticText?.let { text -> DiagnosticDialog(text) { diagnosticText = null } }
 
         val s = model.selection
+        var datePicker by rememberSaveable(s.page, s.detail, s.app) { mutableStateOf<ReportDateMode?>(null) }
+        val onPickPeriod = { datePicker = reportDateMode(s.period) }
+        datePicker?.let { mode ->
+            ReportDateDialog(model, mode, onDismiss = { datePicker = null })
+        }
         val rendered = model.display
         val startupWorkGate = (context.applicationContext as? UsageTimeApplication)?.startupWorkGate
         val initialReportReady = rendered.report != null || model.loadError != null || !s.isReportPage
@@ -306,7 +311,7 @@ fun UsageApp(model: UsageModel = viewModel(), widgetNavigation: WidgetNavigation
                                 model = model,
                                 showCalendar = s.page < 2 || s.page == 4,
                                 decorated = !loadingOverview,
-                                onCalendar = { showCustomDateRangePicker(context, model) },
+                                onCalendar = { datePicker = ReportDateMode.RANGE },
                                 onRefresh = model::refresh
                             )
                             if (model.computing && !loadingOverview) {
@@ -347,9 +352,9 @@ fun UsageApp(model: UsageModel = viewModel(), widgetNavigation: WidgetNavigation
                                         eyebrow = "使用时间"
                                     )
                                 }
-                                s.page == 4 -> CategoriesScreen(model)
+                                s.page == 4 -> CategoriesScreen(model, onPickPeriod)
                                 s.page == 2 -> CompareScreen(model)
-                                else -> StatisticsScreen(model, openUsageAccess, showDiagnostics)
+                                else -> StatisticsScreen(model, openUsageAccess, showDiagnostics, onPickPeriod)
                             }
                         }
                     }

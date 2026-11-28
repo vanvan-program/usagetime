@@ -1,8 +1,5 @@
 package dev.usagetime.app
 
-import android.app.DatePickerDialog
-import android.content.Context
-import android.content.res.Configuration
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -47,7 +44,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -59,8 +57,6 @@ import dev.usagetime.core.Period
 import dev.usagetime.core.UsageReport
 import dev.usagetime.core.durationText
 import java.time.Instant
-import java.time.LocalDate
-import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
 private val FULL_DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyy年M月d日")
@@ -135,43 +131,12 @@ private data class RecordingNotice(
     val enabled: Boolean = true
 )
 
-internal fun showCustomDateRangePicker(context: Context, model: UsageModel) {
-    showDatePicker(context, model.selection.anchor, zone = model.zone) { first ->
-        showDatePicker(context, Dates.date(model.now, model.zone), first, zone = model.zone) { last ->
-            model.change { it.copy(period = Period.CUSTOM, custom = first to last) }
-        }
-    }
-}
-
-private fun showDatePicker(
-    context: Context,
-    initial: LocalDate,
-    min: LocalDate? = null,
-    zone: ZoneId = ZoneId.systemDefault(),
-    onDate: (LocalDate) -> Unit
-) {
-    val mode = context.getSharedPreferences("usage-settings", 0).getString("theme", "system")
-    val isDark = mode == "dark" || (mode == "system" &&
-        (context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
-        Configuration.UI_MODE_NIGHT_YES)
-    val dialog = DatePickerDialog(
-        context,
-        if (isDark) R.style.DateDialogDark else R.style.DateDialogLight,
-        { _, y, m, d -> onDate(LocalDate.of(y, m + 1, d)) },
-        initial.year,
-        initial.monthValue - 1,
-        initial.dayOfMonth
-    )
-    dialog.datePicker.maxDate = System.currentTimeMillis()
-    min?.let { dialog.datePicker.minDate = it.atStartOfDay(zone).toInstant().toEpochMilli() }
-    dialog.show()
-}
-
 @Composable
 internal fun StatisticsScreen(
     model: UsageModel,
     onGrant: () -> Unit,
-    onDiagnostics: () -> Unit
+    onDiagnostics: () -> Unit,
+    onPickPeriod: () -> Unit
 ) {
     val s = model.selection
     val r = model.display.report
@@ -239,6 +204,9 @@ internal fun StatisticsScreen(
                 Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                if (s.period == Period.CUSTOM) {
+                    HindsightChip(UsagePresentation.periodShortLabel(Period.CUSTOM), true, onPickPeriod)
+                }
                 periods.forEach { period ->
                     HindsightChip(
                         label = UsagePresentation.periodShortLabel(period),
@@ -287,7 +255,7 @@ internal fun StatisticsScreen(
                 }
             } else {
                 item { SummaryCard(model, r) }
-                item { UsageTrendCard(model, r) }
+                item { UsageTrendCard(model, r, onPickPeriod) }
             }
             if (s.detail) {
                 item {
@@ -501,10 +469,9 @@ private fun SummaryCard(model: UsageModel, report: UsageReport) {
 }
 
 @Composable
-private fun UsageTrendCard(model: UsageModel, report: UsageReport) {
+private fun UsageTrendCard(model: UsageModel, report: UsageReport, onPickPeriod: () -> Unit) {
     val c = hindsightColors()
     val s = model.selection
-    val context = LocalContext.current
     val today = Dates.date(model.now, model.zone)
     HindsightCard {
         HindsightCardTitle(
@@ -522,13 +489,7 @@ private fun UsageTrendCard(model: UsageModel, report: UsageReport) {
             DateNavigator(
                 model = model,
                 modifier = Modifier.weight(1f),
-                onPick = {
-                    if (s.detail) {
-                        showDatePicker(context, s.anchor, zone = model.zone) { date -> model.change { it.copy(anchor = date) } }
-                    } else {
-                        showCustomDateRangePicker(context, model)
-                    }
-                }
+                onPick = onPickPeriod
             )
         }
         if (s.period == Period.ALL) {
@@ -593,7 +554,7 @@ internal fun DateNavigator(
         )
         Surface(
             onClick = onPick,
-            modifier = Modifier.weight(1f).height(38.dp),
+            modifier = Modifier.weight(1f).height(38.dp).semantics { contentDescription = "选择统计周期" },
             shape = RoundedCornerShape(12.dp),
             color = c.control,
             border = BorderStroke(1.dp, c.border)

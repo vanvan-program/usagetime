@@ -24,7 +24,6 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -45,11 +44,10 @@ private val categoryPeriods = listOf(
 )
 
 @Composable
-internal fun CategoriesScreen(model: UsageModel) {
+internal fun CategoriesScreen(model: UsageModel, onPickPeriod: () -> Unit) {
     val selection = model.selection
     val report = model.display.report
     val assignments = model.categoryAssignments
-    val context = LocalContext.current
     val colors = hindsightColors()
     var managing by rememberSaveable { mutableStateOf(false) }
     var filter by rememberSaveable { mutableStateOf<AppCategory?>(null) }
@@ -89,14 +87,14 @@ internal fun CategoriesScreen(model: UsageModel) {
                             label = UsagePresentation.periodShortLabel(period),
                             selected = selection.period == period,
                             onClick = {
-                                if (period == Period.CUSTOM) showCustomDateRangePicker(context, model)
+                                if (period == Period.CUSTOM) onPickPeriod()
                                 else model.period(period)
                             }
                         )
                     }
                 }
             }
-            item { DateNavigator(model, onPick = { showCustomDateRangePicker(context, model) }) }
+            item { DateNavigator(model, onPick = onPickPeriod) }
             item {
                 SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
                     SegmentedButton(

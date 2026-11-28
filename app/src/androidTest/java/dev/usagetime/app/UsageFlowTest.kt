@@ -37,6 +37,31 @@ class UsageFlowTest {
         compose.onNodeWithText("深色").performScrollTo().performClick()
         compose.onNodeWithText("浅色").performClick()
     }
+    @Test fun toolbarRangeIsSharedWithCategoryNavigatorAndWeekSelectsWholePeriod() {
+        val model = compose.runOnIdle { ViewModelProvider(compose.activity)[UsageModel::class.java] }
+        compose.runOnIdle { model.useDemo(true) }
+        compose.waitUntil(10_000) { model.display.report != null && !model.computing }
+        val today = compose.runOnIdle { dev.usagetime.core.Dates.date(model.now, model.zone) }
+        compose.onNodeWithContentDescription("选择自定义日期").performClick()
+        compose.onNodeWithText("最近7天").performClick()
+        compose.runOnIdle {
+            assertEquals(Period.CUSTOM, model.selection.period)
+            assertEquals(today.minusDays(6) to today, model.selection.custom)
+        }
+        tab("分类").performClick()
+        compose.onNodeWithContentDescription("选择统计周期").performClick()
+        compose.onNodeWithText("选择日期范围").assertExists()
+        compose.onNodeWithText("取消").performClick()
+        compose.onNodeWithText("本周").performClick()
+        compose.onNodeWithContentDescription("选择统计周期").performClick()
+        compose.onNodeWithText("选择统计周").assertExists()
+        compose.onNodeWithText("上周").performClick()
+        compose.runOnIdle {
+            assertEquals(Period.WEEK, model.selection.period)
+            assertEquals(dev.usagetime.core.Dates.week(today).minusWeeks(1), model.selection.anchor)
+        }
+    }
+
     @Test fun summaryTabsKeepTheRenderedReportAndDateArrowsStillReload() {
         val model = compose.runOnIdle { ViewModelProvider(compose.activity)[UsageModel::class.java] }
         compose.runOnIdle { model.useDemo(true) }
